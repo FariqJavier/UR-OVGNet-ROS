@@ -1,0 +1,3 @@
+[submodule "workspace/noetic_src/OVGNet"]
+	path = workspace/noetic_src/OVGNet
+	url = https://github.com/cv516Buaa/OVGNet.git
