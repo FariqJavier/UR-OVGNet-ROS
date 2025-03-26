@@ -10,7 +10,7 @@ services:
           GROUP_ID: ${GROUP_ID:-1000}
     image: ovgnet/ros:noetic
     container_name: ovgnet_noetic
-    # network_mode: "host"           # access to host's network
+    # network_mode: "host"           # UNCOMMENT THIS OPTION IF USE WINDOWS DISPLAY
     stdin_open: true               # docker run -i
     tty: true                      # docker run -t
     env_file:
