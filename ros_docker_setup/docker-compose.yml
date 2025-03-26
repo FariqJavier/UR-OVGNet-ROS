@@ -1,15 +1,15 @@
 
 services:
 
-  noetic:
+  ovgnet_noetic:
     build:
         context: ../workspace
         dockerfile: ../ros_docker_setup/Dockerfile.noetic
         args:
           USER_ID: ${USER_ID:-1000}
           GROUP_ID: ${GROUP_ID:-1000}
-    image: ur5/ros:noetic
-    container_name: ros_noetic
+    image: ovgnet/ros:noetic
+    container_name: ovgnet_noetic
     # network_mode: "host"           # access to host's network
     stdin_open: true               # docker run -i
     tty: true                      # docker run -t
@@ -17,28 +17,20 @@ services:
       - .env.noetic
     volumes:
        - /tmp/.X11-unix:/tmp/.X11-unix:rw
-       - /tmp/.docker.xauth:/tmp/.docker.xauth:rw
+       - ~/.Xauthority:/home/ros/.Xauthority:rw
        - ../workspace/noetic_src:/home/ros/catkin_ws/src
        - ../data/noetic:/home/ros/data
        - /dev:/dev
-    # devices: 
-    #    - /dev/dri:/dev/dri
-    #    - /dev/video0:/dev/video0
-    #    - /dev/video1:/dev/video1
-    #    - /dev/video2:/dev/video2
-    #    - /dev/video3:/dev/video3
-    #    - /dev/video4:/dev/video4
-    #    - /dev/video5:/dev/video5
-    #    - /dev/video6:/dev/video6
-    #    - /dev/video7:/dev/video7
-    #    - /dev/bus/usb:/dev/bus/usb
     deploy:
       resources:
         reservations:
           devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+          - driver: nvidia
+            capabilities:
+              - gpu
+              - utility # nvidia-smi
+              - compute # CUDA
+              - video   # NVDEC/NVENC/NVCUVID. For instance to use a hardware accelerated ffmpeg. Skip it if you don't need it
     # privileged: true
 
   # kinetic:
