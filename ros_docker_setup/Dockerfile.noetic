@@ -23,6 +23,7 @@ RUN apt-get update \
     nano \
     curl \
     git \
+    iputils-ping \
     python3-pip \
     python3-catkin-tools \
     python3-rosdep \
@@ -48,7 +49,9 @@ USER $USERNAME
 # Setup CUDA environment
 RUN echo 'export PATH=/usr/local/cuda-11.3/bin${PATH:+:${PATH}}' >> /home/$USERNAME/.bashrc \
     && echo 'export LD_LIBRARY_PATH=/usr/local/cuda-11.3/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}' >> /home/$USERNAME/.bashrc \
-    && echo 'export ROBOT_IP=$ROBOT_IP' >> /home/$USERNAME/.bashrc
+    && echo 'export ROBOT_IP=$ROBOT_IP' >> /home/$USERNAME/.bashrc \
+    && echo 'export ROS_HOSTNAME=localhost' >> /home/$USERNAME/.bashrc \
+    && echo 'export ROS_MASTER_URI=http://localhost:11311' >> /home/$USERNAME/.bashrc \
 
 # Rest of your existing Dockerfile remains the same, starting from:
 RUN mkdir -p /home/$USERNAME/catkin_ws/src \
