@@ -93,6 +93,10 @@ RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/graspnet/graspnet/pointnet2 \
     && cd /home/$USERNAME/catkin_ws/src/OVGNet/graspnet/graspnet/knn \
     && python3 setup.py install
 
+# Install necessary groundingdino dependency
+RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/groundingdino \
+    && pip install -e .
+
 RUN sudo apt-get update \
     && sudo apt-get upgrade -y \
     && echo 'source /opt/$USERNAME/$ROS_DISTRO/setup.bash' >> /home/$USERNAME/.bashrc \
