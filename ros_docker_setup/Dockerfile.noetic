@@ -73,12 +73,22 @@ RUN source /opt/$USERNAME/$ROS_DISTRO/setup.bash \
     && rosdep install --from-paths . --ignore-src -r -y --rosdistro=$ROS_DISTRO \
     && catkin build 
 
+# Configure virtual environment
+RUN apt-get update \
+    && apt-get install -y \
+    python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+    && cd /home/$USERNAME/catkin_ws/src/OVGNet \
+    && python3 -m venv venv \
+    && source /home/$USERNAME/catkin_ws/src/OVGNet/venv/bin/activate \
+
 # Modify PyTorch installation to use CUDA 11.3
 RUN pip3 install pillow==9.1.0 \
-    && pip3 install torch==1.10.1+cu113 torchvision==0.11.2+cu113 torchaudio==0.10.1 -f https://download.pytorch.org/whl/cu113/torch_stable.html \
+    && pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113 \
     && pip3 install graspnetAPI
 
 RUN sudo apt-get update \
     && sudo apt-get upgrade -y \
     && echo 'source /opt/$USERNAME/$ROS_DISTRO/setup.bash' >> /home/$USERNAME/.bashrc \
+    && echo 'source /home/$USERNAME/catkin_ws/src/OVGNet/venv/bin/activate' >> /home/$USERNAME/.bashrc \
     && echo 'source /home/$USERNAME/catkin_ws/devel/setup.bash' >> /home/$USERNAME/.bashrc
