@@ -73,14 +73,20 @@ RUN source /opt/$USERNAME/$ROS_DISTRO/setup.bash \
     && rosdep install --from-paths . --ignore-src -r -y --rosdistro=$ROS_DISTRO \
     && catkin build 
 
-# Configure virtual environment
+# Configure python3.9 virtual environment
 RUN apt-get update \
     && apt-get install -y \
-    python3-venv \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y \ 
+    python3.9 \
+    python3.9-venv \
+    python3.9-dev \
     && rm -rf /var/lib/apt/lists/*
-    && cd /home/$USERNAME/catkin_ws/src/OVGNet \
-    && python3 -m venv venv \
-    && source /home/$USERNAME/catkin_ws/src/OVGNet/venv/bin/activate \
+    && cd /home/$USERNAME/catkin_ws/ \
+    && python3.9 -m venv "venv3.9" \
+    && source /home/$USERNAME/catkin_ws/venv/bin/activate 
 
 # Modify PyTorch installation to use CUDA 11.3
 RUN pip3 install pillow==9.1.0 \
@@ -100,5 +106,5 @@ RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/groundingdino \
 RUN sudo apt-get update \
     && sudo apt-get upgrade -y \
     && echo 'source /opt/$USERNAME/$ROS_DISTRO/setup.bash' >> /home/$USERNAME/.bashrc \
-    && echo 'source /home/$USERNAME/catkin_ws/src/OVGNet/venv/bin/activate' >> /home/$USERNAME/.bashrc \
+    && echo 'source /home/$USERNAME/catkin_ws/venv/bin/activate' >> /home/$USERNAME/.bashrc \
     && echo 'source /home/$USERNAME/catkin_ws/devel/setup.bash' >> /home/$USERNAME/.bashrc
