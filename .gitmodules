@@ -1,6 +1,3 @@
-[submodule "workspace/noetic_src/OVGNet"]
-	path = workspace/noetic_src/OVGNet
-	url = https://github.com/cv516Buaa/OVGNet.git
 [submodule "workspace/noetic_src/graspnet-baseline"]
 	path = workspace/noetic_src/graspnet-baseline
 	url = https://github.com/graspnet/graspnet-baseline.git
