@@ -1,1 +1,5 @@
-workspace/noetic_src/OVGNet/venv
+# groundingdino build
+workspace/noetic_src/OVGNet/groundingdino/build/lib.linux-x86_64-3.9/
+workspace/noetic_src/OVGNet/groundingdino/build/temp.linux-x86_64-3.9/
+workspace/noetic_src/OVGNet/groundingdino/groundingdino.egg-info/
+workspace/noetic_src/OVGNet/groundingdino/_C.cpython-39-x86_64-linux-gnu.so
