@@ -72,10 +72,12 @@ RUN apt-get update \
     && python3.9 -m venv "venv3.9" \
     && source /home/$USERNAME/catkin_ws/venv3.9/bin/activate 
 
-# Modify PyTorch installation to use CUDA 11.3
-RUN pip3 install pillow==9.1.0 \
-    && pip3 install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113 \
-    && pip3 install graspnetAPI
+# Install PyTorch suitable for CUDA 11.3
+RUN pip3 install \ 
+    torch==1.11.0+cu113 \
+    torchvision==0.12.0+cu113 \
+    torchaudio==0.11.0 \
+    --extra-index-url https://download.pytorch.org/whl/cu113 
 
 # Install necessary GroundingDino dependency
 RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/groundingdino \
@@ -93,6 +95,11 @@ RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/test_vg/Open-GroundingDino \
     && cd /home/$USERNAME/catkin_ws/src/OVGNet/test_vg/Open-GroundingDino/models/GroundingDINO/ops \
     && python setup.py build install \
     && python test.py
+
+# Install OVGNet dependency
+RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/ \
+    && export SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True \
+    && pip3 install -r requirements.txt
 
 # Source ROS environment
 RUN source /opt/$USERNAME/$ROS_DISTRO/setup.bash \
