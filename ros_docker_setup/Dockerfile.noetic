@@ -11,6 +11,18 @@ ENV NVIDIA_DRIVER_CAPABILITIES=all
 
 SHELL ["/bin/bash", "-c"]
 
+# Install ROS and essential packages
+RUN apt-get update \
+    && apt-get install -y \
+    ros-noetic-desktop-full \
+    nano \
+    curl \
+    git \
+    iputils-ping \
+    python3-pip \
+    python3-catkin-tools \
+    python3-rosdep 
+
 # Setup ROS repositories
 RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
     && curl -s https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | apt-key add - \
@@ -55,31 +67,19 @@ RUN apt-get update \
     python3.9 \
     python3.9-venv \
     python3.9-dev \
+    && rm -rf /var/lib/apt/lists/* \
     && cd /home/$USERNAME/catkin_ws/ \
     && python3.9 -m venv "venv3.9" \
     && source /home/$USERNAME/catkin_ws/venv3.9/bin/activate 
-
-# Install ROS and essential packages
-RUN apt-get update \
-    && apt-get install -y \
-    ros-noetic-desktop-full \
-    nano \
-    curl \
-    git \
-    iputils-ping \
-    python3-pip \
-    python3-catkin-tools \
-    python3-rosdep \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install necessary groundingdino dependency
-RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/groundingdino \
-    && pip3 install -e .
 
 # Modify PyTorch installation to use CUDA 11.3
 RUN pip3 install pillow==9.1.0 \
     && pip3 install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113 \
     && pip3 install graspnetAPI
+
+# Install necessary groundingdino dependency
+RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/groundingdino \
+    && pip3 install -e .
 
 # Install necessary graspnet model dependency
 RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/graspnet/graspnet/pointnet2 \
