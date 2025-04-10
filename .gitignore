@@ -12,3 +12,5 @@ workspace/noetic_src/OVGNet/test_vg/finetune2_training
 workspace/noetic_src/OVGNet/test_vg/scratch_training
 workspace/noetic_src/OVGNet/test_vg/test_result
 workspace/noetic_src/OVGNet/test_vg/train_result
+
+__pycache__/
