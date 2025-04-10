@@ -1,3 +1,6 @@
 [submodule "workspace/noetic_src/graspnet-baseline"]
 	path = workspace/noetic_src/graspnet-baseline
 	url = https://github.com/graspnet/graspnet-baseline.git
+[submodule "workspace/noetic_src/OVGNet/test_vg/Open-GroundingDino"]
+	path = workspace/noetic_src/OVGNet/test_vg/Open-GroundingDino
+	url = https://github.com/longzw1997/Open-GroundingDino.git
