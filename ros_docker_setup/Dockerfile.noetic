@@ -77,7 +77,7 @@ RUN pip3 install pillow==9.1.0 \
     && pip3 install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113 \
     && pip3 install graspnetAPI
 
-# Install necessary groundingdino dependency
+# Install necessary GroundingDino dependency
 RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/groundingdino \
     && pip3 install -e .
 
@@ -87,12 +87,17 @@ RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/graspnet/graspnet/pointnet2 \
     && cd /home/$USERNAME/catkin_ws/src/OVGNet/graspnet/graspnet/knn \
     && python3 setup.py install
 
-# Initialize rosdep
-RUN rosdep init && rosdep update
+# Install Open-GroundingDino for test Visual Grounding implementation
+RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/test_vg/Open-GroundingDino \
+    && pip3 install -r requirements.txt \
+    && cd /home/$USERNAME/catkin_ws/src/OVGNet/test_vg/Open-GroundingDino/models/GroundingDINO/ops \
+    && python setup.py build install \
+    && python test.py
 
 # Source ROS environment
 RUN source /opt/$USERNAME/$ROS_DISTRO/setup.bash \
-    && cd /home/$USERNAME/catkin_ws \	
+    && cd /home/$USERNAME/catkin_ws \
+    && rosdep init && rosdep update \
     && catkin init 
 
 # Install dependencies and build workspace
