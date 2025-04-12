@@ -9,7 +9,7 @@ matplotlib==3.3.3
 numpy==1.23.5
 open3d==0.15.2
 open3d_plus==0.1.0
-opencv_python==4.4.0.46
+opencv-python==4.4.0.46
 Pillow==9.2.0
 pybullet==3.0.7
 PyYAML==6.0
