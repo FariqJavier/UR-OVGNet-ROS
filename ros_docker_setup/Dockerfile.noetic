@@ -18,10 +18,12 @@ RUN apt-get update \
     nano \
     curl \
     git \
+    wget \
     iputils-ping \
     python3-pip \
     python3-catkin-tools \
-    python3-rosdep 
+    python3-rosdep \
+    && rm -rf /var/lib/apt/lists/*
 
 # Setup ROS repositories
 RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
@@ -57,20 +59,23 @@ WORKDIR /home/$USERNAME/catkin_ws
 # Copy code into workspace
 COPY --chown=$USERNAME ./noetic_src src
 
-# Configure python3.9 virtual environment
-RUN apt-get update \
-    && apt-get install -y \
-    software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa \
-    && apt-get update \
-    && apt-get install -y \ 
-    python3.9 \
-    python3.9-venv \
-    python3.9-dev \
-    && rm -rf /var/lib/apt/lists/* \
-    && cd /home/$USERNAME/catkin_ws/ \
-    && python3.9 -m venv "venv3.9" \
-    && source /home/$USERNAME/catkin_ws/venv3.9/bin/activate 
+# setup miniconda nad avoid pythonpath conflict when not using miniconda
+RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
+    && chmod +x Miniconda3-latest-Linux-x86_64.sh \
+    && ./Miniconda3-latest-Linux-x86_64.sh -b -u -p /home/$USERNAME/miniconda3 \
+    && rm Miniconda3-latest-Linux-x86_64.sh \
+    && echo 'export PATH=/home/$USERNAME/miniconda3/bin${PATH:+:${PATH}}' >> /home/$USERNAME/.bashrc \
+    && echo '
+    # Only set PYTHONPATH if not using Miniconda
+    if [[ "$PATH" != *"miniconda3"* ]]; then
+        export PYTHONPATH=/opt/ros/noetic/lib/python3/dist-packages
+    fi' >> /home/$USERNAME/.bashrc \
+    && source /home/$USERNAME/miniconda3/bin/activate \
+    && conda init bash
+
+# Configure conda environment
+RUN conda create -n python3.9-env python=3.9 -y \
+    && conda activate python3.9-env
 
 # Install PyTorch suitable for CUDA 11.3
 RUN pip3 install \ 
@@ -117,5 +122,5 @@ RUN source /opt/$USERNAME/$ROS_DISTRO/setup.bash \
 RUN sudo apt-get update \
     && sudo apt-get upgrade -y \
     && echo 'source /opt/$USERNAME/$ROS_DISTRO/setup.bash' >> /home/$USERNAME/.bashrc \
-    && echo 'source /home/$USERNAME/catkin_ws/venv/bin/activate' >> /home/$USERNAME/.bashrc \
+    && echo 'source /home/$USERNAME/miniconda3/bin/activate' >> /home/$USERNAME/.bashrc \
     && echo 'source /home/$USERNAME/catkin_ws/devel/setup.bash' >> /home/$USERNAME/.bashrc
