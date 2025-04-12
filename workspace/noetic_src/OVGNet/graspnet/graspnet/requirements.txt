@@ -1,6 +1,6 @@
 torch==1.6
 tensorboard==2.3
-numpy
+numpy==1.23.5
 scipy
 open3d==0.8
 Pillow

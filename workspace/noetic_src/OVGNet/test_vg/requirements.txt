@@ -8,7 +8,7 @@ timm
 torch
 torchvision
 transformers
-numpy
+numpy==1.23.5
 opencv-python
 supervision==0.6.0
 pycocotools
