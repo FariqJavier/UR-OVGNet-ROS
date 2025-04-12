@@ -22,4 +22,4 @@ $ bash noetic_exec.sh
 
 TODO:
 
-REMOVE UNNECESSARY FOLDER (need to search any files with keyword "/home/lm")
+REMOVE UNNECESSARY FOLDER (need to search any files with keyword "/home/lm" or "/media/lm/")
