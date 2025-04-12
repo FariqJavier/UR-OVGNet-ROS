@@ -1,6 +1,6 @@
 from transformers import AutoTokenizer, BertModel, BertTokenizer, RobertaModel, RobertaTokenizerFast
 import os
-path = '/home/lm/limeng/bert'
+model = 'bert-base-uncased'
 def get_tokenlizer(text_encoder_type):
     if not isinstance(text_encoder_type, str):
         # print("text_encoder_type is not a str")
@@ -16,13 +16,13 @@ def get_tokenlizer(text_encoder_type):
             )
     print("final text_encoder_type: {}".format(text_encoder_type))
 
-    tokenizer = AutoTokenizer.from_pretrained(path)
+    tokenizer = AutoTokenizer.from_pretrained(model)
     return tokenizer
 
 
 def get_pretrained_language_model(text_encoder_type):
     if text_encoder_type == "bert-base-uncased" or (os.path.isdir(text_encoder_type) and os.path.exists(text_encoder_type)):
-        return BertModel.from_pretrained(path)
+        return BertModel.from_pretrained(model)
     if text_encoder_type == "roberta-base":
         return RobertaModel.from_pretrained(text_encoder_type)
 
