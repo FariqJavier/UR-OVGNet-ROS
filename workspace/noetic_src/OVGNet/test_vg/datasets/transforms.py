@@ -6,12 +6,14 @@ import random
 
 import PIL
 import torch
+import os
 import torchvision.transforms as T
 import torchvision.transforms.functional as F
 
 from util.box_ops import box_xyxy_to_cxcywh
 from util.misc import interpolate
 
+SAVE_DIR = os.environ.get("SAVE_DIR", "/home/ros/data")
 
 def crop(image, target, region):
     cropped_image = F.crop(image, *region)
@@ -60,6 +62,7 @@ def crop(image, target, region):
 def hflip(image, target):
     flipped_image = F.hflip(image)
     # flipped_image.save("/home/lm/Pictures/2.jpg")
+    # image.save(os.path.join(SAVE_DIR, "2.jpg"))
     # flipped_depth = F.hflip(depth)
     w, h = image.size
 

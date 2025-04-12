@@ -12,8 +12,11 @@ import cv2
 #         b =1
 import json
 
+OVGRASPING_DIR = os.environ.get("OVGRASPING_DIR", "/home/ros/catkin_ws/src/noetic_src/OVGNet/datasets/ovgrasping")
+train_path = os.path.join(OVGRASPING_DIR, "base_train.jsonl")
+
 data = []
-with open('/home/lm/Desktop/train.jsonl', 'r') as file:
+with open(train_path, 'r') as file:
     for line in file:
         # json.loads 将 JSON 字符串转换为 Python 对象
         data.append(json.loads(line))

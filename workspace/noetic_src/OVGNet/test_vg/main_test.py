@@ -24,6 +24,7 @@ from engine import evaluate, train_one_epoch
 from groundingdino.util.utils import clean_state_dict
 # from tools import lm_depth_mean_std
 
+OUTPUT_DIR = os.environ.get("TRAIN_OUTPUT_DIR", "/home/ros/catkin_ws/src/noetic_src/OVGNet/training_output")
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
@@ -40,7 +41,7 @@ def get_args_parser():
     parser.add_argument('--fix_size', action='store_true')
 
     # training parameters
-    parser.add_argument('--output_dir', default='/home/lm/limeng/GD_train_on_QHdataset_demo',
+    parser.add_argument('--output_dir', default=OUTPUT_DIR,
                         help='path where to save, empty for no saving')
     parser.add_argument('--note', default='',
                         help='add some notes to the experiment')

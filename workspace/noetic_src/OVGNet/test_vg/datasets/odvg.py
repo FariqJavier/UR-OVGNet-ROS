@@ -10,6 +10,8 @@ sys.path.append(os.path.dirname(sys.path[0]))
 
 import datasets.transforms as T
 
+SAVE_DIR = os.environ.get("SAVE_DIR", "/home/ros/data")
+
 class ODVGDataset(VisionDataset):
     """
     Args:
@@ -71,6 +73,7 @@ class ODVGDataset(VisionDataset):
         #     raise FileNotFoundError(f"{depth_path} not found.")#limeng
         image = Image.open(abs_path).convert('RGB')
         # image.save("/home/lm/Pictures/1.jpg")
+        # image.save(os.path.join(SAVE_DIR, "1.jpg"))
         # depth = Image.open(depth_path)# limeng 需要归一化
         # if depth.mode != 'L': #limeng
         #     depth = depth.convert('L')#limeng
