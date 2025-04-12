@@ -92,13 +92,13 @@ pip install -e .
 ## Run
 ```
 cd /OVGNet/
-python test.py --testing_case_dir ./test_cases/simple/apple --pretrain ./checkpoint/OVGANet.pth
+python3 test.py --testing_case_dir ./test_cases/simple/apple --pretrain ./checkpoint/OVGANet.pth
 ```
 
 ## Test on OVGrasping
 ```
 cd /OVGNet/test_vg/
-python test_vg.py --c ./config/cfg_odvg.py --datasets ./config/datasets_vg_example.json --pretrain_model_path  ./checkpoint/OVGANet.pth
+python3 test_vg.py --c ./config/cfg_odvg.py --datasets ./config/datasets_vg_example.json --pretrain_model_path  ./checkpoint/OVGANet.pth
 ```
 
 ## Cite

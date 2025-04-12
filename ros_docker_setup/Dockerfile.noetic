@@ -98,8 +98,8 @@ RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/graspnet/graspnet/pointnet2 \
 RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/test_vg/Open-GroundingDino \
     && pip3 install -r requirements.txt \
     && cd /home/$USERNAME/catkin_ws/src/OVGNet/test_vg/Open-GroundingDino/models/GroundingDINO/ops \
-    && python setup.py build install \
-    && python test.py
+    && python3 setup.py build install \
+    && python3 test.py
 
 # Install OVGNet dependency
 RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/ \

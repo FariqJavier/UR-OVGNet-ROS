@@ -16,7 +16,5 @@ workspace/noetic_src/OVGNet/test_vg/test_result
 workspace/noetic_src/OVGNet/test_vg/train_result
 
 workspace/noetic_src/OVGNet/test_vg/datasets/ovgrasping
-workspace/noetic_src/OVGNet/test_vg/models/GroundingDINO/__pycache__/
-workspace/noetic_src/OVGNet/test_vg/models/GroundingDINO/backbone/__pycache__/
 
 __pycache__/
