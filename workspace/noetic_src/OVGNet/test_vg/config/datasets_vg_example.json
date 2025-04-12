@@ -1,8 +1,8 @@
 {
   "train": [
     {
-      "root": "/home/ros/catkin_ws/src/noetic_src/OVGNet/datasets/ovgrasping/img_total",
-      "anno": "/home/ros/catkin_ws/src/noetic_src/OVGNet/datasets/ovgrasping/base_test.jsonl",
+      "root": "/home/ros/catkin_ws/src/OVGNet/test_vg/datasets/ovgrasping/img_total",
+      "anno": "/home/ros/catkin_ws/src/OVGNet/test_vg/datasets/ovgrasping/base_test.jsonl",
       "dataset_mode": "odvg"
     }
   ],
