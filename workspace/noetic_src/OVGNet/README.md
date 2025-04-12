@@ -92,7 +92,7 @@ pip install -e .
 ## Run
 ```
 cd /OVGNet/
-python test.py --testing_case_dir ./test_cases/simple/apple --pretrain ./checkpoint/OVGANet
+python test.py --testing_case_dir ./test_cases/simple/apple --pretrain ./checkpoint/OVGANet.pth
 ```
 
 ## Test on OVGrasping
