@@ -7,11 +7,14 @@ workspace/noetic_src/OVGNet/groundingdino/_C.cpython-39-x86_64-linux-gnu.so
 
 workspace/noetic_src/OVGNet/assets
 workspace/noetic_src/OVGNet/checkpoint
+workspace/noetic_src/OVGNet/training_output
 workspace/noetic_src/OVGNet/test_vg/checkpoint
 workspace/noetic_src/OVGNet/test_vg/finetune_training
 workspace/noetic_src/OVGNet/test_vg/finetune2_training
 workspace/noetic_src/OVGNet/test_vg/scratch_training
 workspace/noetic_src/OVGNet/test_vg/test_result
 workspace/noetic_src/OVGNet/test_vg/train_result
+
+workspace/noetic_src/OVGNet/test_vg/datasets/ovgrasping
 
 __pycache__/
