@@ -98,7 +98,7 @@ python test.py --testing_case_dir ./test_cases/simple/apple --pretrain ./checkpo
 ## Test on OVGrasping
 ```
 cd /OVGNet/test_vg/
-python test_vg.py --c ./config/cfg_odvg.py --datasets ./config/datasets_vg_example.json --pretrain_model_path  OVGNet/checkpoint/OVGANet
+python test_vg.py --c ./config/cfg_odvg.py --datasets ./config/datasets_vg_example.json --pretrain_model_path  ./checkpoint/OVGANet.pth
 ```
 
 ## Cite
