@@ -23,7 +23,7 @@ from engine import evaluate, test_one_epoch
 
 from groundingdino.util.utils import clean_state_dict
 
-OUTPUT_DIR = os.environ.get("TRAIN_OUTPUT_DIR", "/home/ros/catkin_ws/src/noetic_src/OVGNet/training_output")
+OUTPUT_DIR = os.environ.get("TRAIN_OUTPUT_DIR", "/home/ros/catkin_ws/src/OVGNet/training_output")
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
