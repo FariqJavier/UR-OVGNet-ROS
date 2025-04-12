@@ -1,5 +1,5 @@
 #!/bin/bash 
 
-xhost +local:docker
+xhost +local:docker             # RUN THIS ON LINUX DISPLAY                             
 
-docker exec -it ros_noetic bash
+sudo docker exec -it ovgnet_noetic bash

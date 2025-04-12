@@ -1,0 +1,17 @@
+{
+  "train": [
+    {
+      "root": "/home/ros/catkin_ws/src/OVGNet/test_vg/datasets/ovgrasping/img_total",
+      "anno": "/home/ros/catkin_ws/src/OVGNet/test_vg/datasets/ovgrasping/base_test.jsonl",
+      "dataset_mode": "odvg"
+    }
+  ],
+  "val": [
+    {
+      "root": "path/coco_2017/val2017",
+      "anno": "config/instances_val2017.json",
+      "label_map": null,
+      "dataset_mode": "coco"
+    }
+  ]
+}

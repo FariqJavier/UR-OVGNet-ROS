@@ -1,0 +1,2 @@
+len_index1,true_bbox,tp,tp1,total,valid_bbox_count,loss,precision
+0,"[tensor([[0.4812, 0.2781, 0.0938, 0.3604]], device='cuda:0')]",0,41863,47027,51857,123.46733856201172,0.8072777059991901

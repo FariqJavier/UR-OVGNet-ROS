@@ -1,27 +1,39 @@
-FROM osrf/ros:noetic-desktop-full
+FROM nvidia/cuda:11.3.1-cudnn8-devel-ubuntu20.04
 
-ENV DEBIAN_FRONTEND noninteractive
-ENV USERNAME ros
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV USERNAME=ros
 ENV ROS_PYTHON_VERSION=3
 ENV ROS_DISTRO=noetic
 ENV ROBOT_IP=192.168.1.3
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=all
 
 SHELL ["/bin/bash", "-c"]
 
-# Install essential packages
-RUN sudo apt-get update \
-    && sudo apt-get install -y \ 
+# Install ROS and essential packages
+RUN apt-get update \
+    && apt-get install -y \
+    ros-noetic-desktop-full \
     nano \
     curl \
     git \
+    wget \
+    iputils-ping \
     python3-pip \
-    python3-catkin-tools 
+    python3-catkin-tools \
+    python3-rosdep \
+    && rm -rf /var/lib/apt/lists/*
 
-# Create the "ros" user, with the host user' IDs
+# Setup ROS repositories
+RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
+    && curl -s https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | apt-key add - \
+    && echo "deb http://packages.ros.org/ros/ubuntu $(lsb_release -sc) main" > /etc/apt/sources.list.d/ros-latest.list
+
+# Create the "ros" user with the host user's IDs
 ARG USER_ID=1000
 ARG GROUP_ID=1000
 
-ENV USERNAME ros
 RUN adduser --disabled-password --gecos '' $USERNAME \
     && usermod  --uid $USER_ID $USERNAME \
     && groupmod --gid $GROUP_ID $USERNAME \
@@ -31,9 +43,15 @@ RUN adduser --disabled-password --gecos '' $USERNAME \
     && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
 
 USER $USERNAME
-    
-RUN echo 'export ROBOT_IP=$ROBOT_IP' >> /home/$USERNAME/.bashrc
 
+# Setup CUDA environment
+RUN echo 'export PATH=/usr/local/cuda-11.3/bin${PATH:+:${PATH}}' >> /home/$USERNAME/.bashrc \
+    && echo 'export LD_LIBRARY_PATH=/usr/local/cuda-11.3/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}' >> /home/$USERNAME/.bashrc \
+    && echo 'export ROBOT_IP=$ROBOT_IP' >> /home/$USERNAME/.bashrc \
+    && echo 'export ROS_HOSTNAME=localhost' >> /home/$USERNAME/.bashrc \
+    && echo 'export ROS_MASTER_URI=http://localhost:11311' >> /home/$USERNAME/.bashrc 
+
+# Rest of your existing Dockerfile remains the same, starting from:
 RUN mkdir -p /home/$USERNAME/catkin_ws/src \
     && chown -R $USERNAME:$USERNAME /home/$USERNAME/catkin_ws
 WORKDIR /home/$USERNAME/catkin_ws
@@ -41,49 +59,58 @@ WORKDIR /home/$USERNAME/catkin_ws
 # Copy code into workspace
 COPY --chown=$USERNAME ./noetic_src src
 
+# setup miniconda nad avoid pythonpath conflict when not using miniconda
+RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
+    && chmod +x Miniconda3-latest-Linux-x86_64.sh \
+    && ./Miniconda3-latest-Linux-x86_64.sh -b -u -p /home/$USERNAME/miniconda3 \
+    && rm Miniconda3-latest-Linux-x86_64.sh \
+    && echo 'export PATH=/home/$USERNAME/miniconda3/bin${PATH:+:${PATH}}' >> /home/$USERNAME/.bashrc \
+    && echo '
+    # Only set PYTHONPATH if not using Miniconda
+    if [[ "$PATH" != *"miniconda3"* ]]; then
+        export PYTHONPATH=/opt/ros/noetic/lib/python3/dist-packages
+    fi' >> /home/$USERNAME/.bashrc \
+    && source /home/$USERNAME/miniconda3/bin/activate \
+    && conda init bash
+
+# Configure conda environment
+RUN conda create -n python3.9-env python=3.9 -y \
+    && conda activate python3.9-env
+
+# Install PyTorch suitable for CUDA 11.3
+RUN pip3 install \ 
+    torch==1.11.0+cu113 \
+    torchvision==0.12.0+cu113 \
+    torchaudio==0.11.0 \
+    --extra-index-url https://download.pytorch.org/whl/cu113 
+
+# Install necessary GroundingDino dependency
+RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/groundingdino \
+    && pip3 install -e .
+
+# Install necessary graspnet model dependency
+RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/graspnet/graspnet/pointnet2 \
+    && python3 setup.py install \
+    && cd /home/$USERNAME/catkin_ws/src/OVGNet/graspnet/graspnet/knn \
+    && python3 setup.py install
+
+# Install Open-GroundingDino for test Visual Grounding implementation
+RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/test_vg/Open-GroundingDino \
+    && pip3 install -r requirements.txt \
+    && cd /home/$USERNAME/catkin_ws/src/OVGNet/test_vg/Open-GroundingDino/models/GroundingDINO/ops \
+    && python3 setup.py build install \
+    && python3 test.py
+
+# Install OVGNet dependency
+RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/ \
+    && export SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True \
+    && pip3 install -r requirements.txt
+
 # Source ROS environment
 RUN source /opt/$USERNAME/$ROS_DISTRO/setup.bash \
-    && cd /home/$USERNAME/catkin_ws \	
+    && cd /home/$USERNAME/catkin_ws \
+    && rosdep init && rosdep update \
     && catkin init 
-
-# Install additional ROS packages 
-RUN sudo apt-get update \
-    && sudo apt-get install -y \
-    ros-$ROS_DISTRO-moveit \
-    ros-$ROS_DISTRO-kdl-parser-py \
-    # ros-$ROS_DISTRO-ur-msgs \
-    ros-$ROS_DISTRO-industrial-robot-status-interface \
-    # ros-$ROS_DISTRO-ur-robot-driver \
-    # ros-$ROS_DISTRO-ur-calibration \
-    ros-$ROS_DISTRO-ros-control \
-    ros-$ROS_DISTRO-ros-controllers \
-    ros-$ROS_DISTRO-warehouse-ros-mongo \
-    ros-$ROS_DISTRO-trac-ik \
-    ros-$ROS_DISTRO-soem \
-    ros-$ROS_DISTRO-socketcan-interface \
-    ros-$ROS_DISTRO-rosbridge-server \
-    ros-$ROS_DISTRO-tf2-web-republisher \
-    ros-$ROS_DISTRO-web-video-server \
-    mongodb \
-    libssl-dev \
-    libboost-all-dev \
-    libsasl2-dev \
-    && sudo rm -rf /var/lib/apt/lists/*
-RUN pip3 install pymodbus==2.5.3 pynput==1.7.7
-
-# Install latest pypy3 to avoid ompl==1.5.2 missmatch pypy3 error
-RUN sudo apt-get update \
-    && sudo apt-get install -y software-properties-common \
-    && sudo add-apt-repository ppa:pypy/ppa \
-    && sudo apt-get update \
-    && sudo apt-get install -y pypy3 
-
-# Install OMPL 1.5.2 and Ruckig 0.14.0
-RUN cd /home/$USERNAME/catkin_ws/src/ompl-1.5.2 \
-    && cp install-ompl-ubuntu.sh.in install-ompl-ubuntu.sh \
-    && chmod +x install-ompl-ubuntu.sh \
-    && ./install-ompl-ubuntu.sh.in --python \
-    && pip3 install ruckig==0.14.0
 
 # Install dependencies and build workspace
 RUN source /opt/$USERNAME/$ROS_DISTRO/setup.bash \
@@ -92,50 +119,8 @@ RUN source /opt/$USERNAME/$ROS_DISTRO/setup.bash \
     && rosdep install --from-paths . --ignore-src -r -y --rosdistro=$ROS_DISTRO \
     && catkin build 
 
-# # Install IntelRealsense SDK 2.0 with InterRealsense Viewer
-# # Reconnect the Intel RealSense depth camera and run: realsense-viewer to verify the installation.
-# RUN sudo mkdir -p /etc/apt/keyrings \
-#     && curl -sSf https://librealsense.intel.com/Debian/librealsense.pgp | sudo tee /etc/apt/keyrings/librealsense.pgp > /dev/null \
-#     && sudo apt-get install apt-transport-https \
-#     && echo "deb [signed-by=/etc/apt/keyrings/librealsense.pgp] https://librealsense.intel.com/Debian/apt-repo `lsb_release -cs` main" | \
-#     && sudo tee /etc/apt/sources.list.d/librealsense.list \
-#     && sudo apt-get update \
-#     # && sudo apt-get install ros-$ROS_DISTRO-realsense2-camera \
-#     # && sudo apt-get install ros-$ROS_DISTRO-realsense2-description \
-#     # && sudo apt-get install librealsense2-dkms \
-#     && sudo apt-get install librealsense2-utils \
-#     # Optionally install the developer and debug packages:
-#     # With dev package installed, you can compile an application with librealsense using g++ -std=c++11 filename.cpp -lrealsense2 or an IDE of your choice.
-#     && sudo apt-get install librealsense2-dev \
-#     && sudo apt-get install librealsense2-dbg \
-#     && sudo apt-get update \
-#     && sudo apt-get upgrade
-
-RUN sudo mkdir -p /etc/apt/keyrings \
-    && curl -sSf https://librealsense.intel.com/Debian/librealsense.pgp | sudo tee /etc/apt/keyrings/librealsense.pgp > /dev/null \
-    && sudo apt-get install -y apt-transport-https \
-    && echo "deb [signed-by=/etc/apt/keyrings/librealsense.pgp] https://librealsense.intel.com/Debian/apt-repo `lsb_release -cs` main" | sudo tee /etc/apt/sources.list.d/librealsense.list \
-    && sudo apt-get update \
-    && sudo apt-get install -y \
-        usbutils \
-        librealsense2-utils \
-        librealsense2-dev \
-        librealsense2-dbg \
-    && sudo apt-get upgrade -y \
-    && sudo rm -rf /var/lib/apt/lists/*
-
-# Configure User access to realsense devices
-RUN sudo usermod -a -G video $USERNAME
-
-# Install GraspNet API
-RUN pip3 install pillow==9.1.0 \
-    && pip3 install torch torchvision torchaudio \
-    # && pip3 install torch==1.8.1+cu111 torchvision==0.9.1+cu111 torchaudio==0.8.1 -f https://download.pytorch.org/whl/torch_stable.html \
-    # && pip3 install open3d==0.12.0 \
-    # && pip3 install trimesh==3.9.0 \
-    && pip3 install graspnetAPI
-
 RUN sudo apt-get update \
     && sudo apt-get upgrade -y \
     && echo 'source /opt/$USERNAME/$ROS_DISTRO/setup.bash' >> /home/$USERNAME/.bashrc \
+    && echo 'source /home/$USERNAME/miniconda3/bin/activate' >> /home/$USERNAME/.bashrc \
     && echo 'source /home/$USERNAME/catkin_ws/devel/setup.bash' >> /home/$USERNAME/.bashrc

@@ -1,0 +1,10 @@
+torch
+torchvision
+transformers==4.34.1
+addict==2.4.0
+yapf==0.40.1
+timm==0.9.8
+numpy==1.23.5
+opencv-python==4.4.0.46
+supervision==0.6.0
+pycocotools
