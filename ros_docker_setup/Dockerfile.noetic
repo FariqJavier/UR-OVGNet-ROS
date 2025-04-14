@@ -31,6 +31,27 @@ RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
     && curl -s https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | apt-key add - \
     && echo "deb http://packages.ros.org/ros/ubuntu $(lsb_release -sc) main" > /etc/apt/sources.list.d/ros-latest.list
 
+# Setup miniconda nad avoid pythonpath conflict when not using miniconda
+RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
+    && chmod +x Miniconda3-latest-Linux-x86_64.sh \
+    && ./Miniconda3-latest-Linux-x86_64.sh -b -u -p /home/$USERNAME/miniconda3 \
+    && rm Miniconda3-latest-Linux-x86_64.sh \
+    # && echo 'export PATH=/home/$USERNAME/miniconda3/bin${PATH:+:${PATH}}' >> /home/$USERNAME/.bashrc \
+    # && echo '
+    # # Only set PYTHONPATH if not using Miniconda
+    # if [[ "$PATH" != *"miniconda3"* ]]; then
+    #     export PYTHONPATH=/opt/ros/noetic/lib/python3/dist-packages
+    # fi' >> /home/$USERNAME/.bashrc \
+    && source /home/$USERNAME/miniconda3/bin/activate \
+    && conda init bash
+
+# Configure conda environment
+RUN conda create -n python3.9-env python=3.9 -y \
+    && conda activate python3.9-env
+
+# Install necessary ROS python 
+RUN pip install rospkg catkin_pkg empy
+
 # Create the "ros" user with the host user's IDs
 ARG USER_ID=1000
 ARG GROUP_ID=1000
@@ -59,24 +80,6 @@ WORKDIR /home/$USERNAME/catkin_ws
 
 # Copy code into workspace
 COPY --chown=$USERNAME ./noetic_src src
-
-# setup miniconda nad avoid pythonpath conflict when not using miniconda
-RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
-    && chmod +x Miniconda3-latest-Linux-x86_64.sh \
-    && ./Miniconda3-latest-Linux-x86_64.sh -b -u -p /home/$USERNAME/miniconda3 \
-    && rm Miniconda3-latest-Linux-x86_64.sh \
-    # && echo 'export PATH=/home/$USERNAME/miniconda3/bin${PATH:+:${PATH}}' >> /home/$USERNAME/.bashrc \
-    # && echo '
-    # # Only set PYTHONPATH if not using Miniconda
-    # if [[ "$PATH" != *"miniconda3"* ]]; then
-    #     export PYTHONPATH=/opt/ros/noetic/lib/python3/dist-packages
-    # fi' >> /home/$USERNAME/.bashrc \
-    && source /home/$USERNAME/miniconda3/bin/activate \
-    && conda init bash
-
-# Configure conda environment
-RUN conda create -n python3.9-env python=3.9 -y \
-    && conda activate python3.9-env
 
 # Install PyTorch suitable for CUDA 11.3
 RUN pip3 install torch==1.12.1+cu113 \
