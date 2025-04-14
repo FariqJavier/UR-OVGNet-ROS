@@ -20,6 +20,8 @@ $ bash noetic_exec.sh
 
 ### NOTES
 
+INPUT CAMERA SIZE: [1280,720] (HARDCODED SIZE AND FIXED BASED ON WORKSPACE SIZE [1280,720])
+
 TODO:
 
 REMOVE UNNECESSARY FOLDER (need to search any files with keyword "/home/lm" or "/media/lm/")
