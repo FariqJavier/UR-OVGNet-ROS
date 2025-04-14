@@ -14,7 +14,7 @@ import collections.abc
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from ..utils.data_utils import CameraInfo, transform_point_cloud, create_point_cloud_from_depth_image,\
+from utils.data_utils import CameraInfo, transform_point_cloud, create_point_cloud_from_depth_image,\
                             get_workspace_mask, remove_invisible_grasp_points
 
 class GraspNetDataset(Dataset):

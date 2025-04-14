@@ -10,7 +10,7 @@ import sys
 import os
 import time
 
-from ..utils.loss_utils import GRASP_MAX_WIDTH, GRASP_MAX_TOLERANCE, THRESH_GOOD, THRESH_BAD,\
+from utils.loss_utils import GRASP_MAX_WIDTH, GRASP_MAX_TOLERANCE, THRESH_GOOD, THRESH_BAD,\
                        transform_point_cloud, generate_grasp_views,\
                        batch_viewpoint_params_to_matrix, huber_loss
 

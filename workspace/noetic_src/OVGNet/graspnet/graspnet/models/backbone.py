@@ -11,7 +11,7 @@ ROOT_DIR = os.path.dirname(BASE_DIR)
 sys.path.append(ROOT_DIR)
 sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
 
-from ..pointnet2.pointnet2_modules import PointnetSAModuleVotes, PointnetFPModule
+from pointnet2.pointnet2_modules import PointnetSAModuleVotes, PointnetFPModule
 
 class Pointnet2Backbone(nn.Module):
     r"""
