@@ -19,6 +19,7 @@ RUN apt-get update \
     curl \
     git \
     wget \
+    gdb \
     iputils-ping \
     python3-pip \
     python3-catkin-tools \
@@ -44,12 +45,12 @@ RUN adduser --disabled-password --gecos '' $USERNAME \
 
 USER $USERNAME
 
-# Setup CUDA environment
-RUN echo 'export PATH=/usr/local/cuda-11.3/bin${PATH:+:${PATH}}' >> /home/$USERNAME/.bashrc \
-    && echo 'export LD_LIBRARY_PATH=/usr/local/cuda-11.3/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}' >> /home/$USERNAME/.bashrc \
-    && echo 'export ROBOT_IP=$ROBOT_IP' >> /home/$USERNAME/.bashrc \
-    && echo 'export ROS_HOSTNAME=localhost' >> /home/$USERNAME/.bashrc \
-    && echo 'export ROS_MASTER_URI=http://localhost:11311' >> /home/$USERNAME/.bashrc 
+# # Setup CUDA environment
+# RUN echo 'export PATH=/usr/local/cuda-11.3/bin${PATH:+:${PATH}}' >> /home/$USERNAME/.bashrc \
+#     && echo 'export LD_LIBRARY_PATH=/usr/local/cuda-11.3/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}' >> /home/$USERNAME/.bashrc \
+#     && echo 'export ROBOT_IP=$ROBOT_IP' >> /home/$USERNAME/.bashrc \
+#     && echo 'export ROS_HOSTNAME=localhost' >> /home/$USERNAME/.bashrc \
+#     && echo 'export ROS_MASTER_URI=http://localhost:11311' >> /home/$USERNAME/.bashrc 
 
 # Rest of your existing Dockerfile remains the same, starting from:
 RUN mkdir -p /home/$USERNAME/catkin_ws/src \
@@ -64,12 +65,12 @@ RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
     && chmod +x Miniconda3-latest-Linux-x86_64.sh \
     && ./Miniconda3-latest-Linux-x86_64.sh -b -u -p /home/$USERNAME/miniconda3 \
     && rm Miniconda3-latest-Linux-x86_64.sh \
-    && echo 'export PATH=/home/$USERNAME/miniconda3/bin${PATH:+:${PATH}}' >> /home/$USERNAME/.bashrc \
-    && echo '
-    # Only set PYTHONPATH if not using Miniconda
-    if [[ "$PATH" != *"miniconda3"* ]]; then
-        export PYTHONPATH=/opt/ros/noetic/lib/python3/dist-packages
-    fi' >> /home/$USERNAME/.bashrc \
+    # && echo 'export PATH=/home/$USERNAME/miniconda3/bin${PATH:+:${PATH}}' >> /home/$USERNAME/.bashrc \
+    # && echo '
+    # # Only set PYTHONPATH if not using Miniconda
+    # if [[ "$PATH" != *"miniconda3"* ]]; then
+    #     export PYTHONPATH=/opt/ros/noetic/lib/python3/dist-packages
+    # fi' >> /home/$USERNAME/.bashrc \
     && source /home/$USERNAME/miniconda3/bin/activate \
     && conda init bash
 
@@ -79,10 +80,15 @@ RUN conda create -n python3.9-env python=3.9 -y \
 
 # Install PyTorch suitable for CUDA 11.3
 RUN pip3 install \ 
-    torch==1.11.0+cu113 \
-    torchvision==0.12.0+cu113 \
-    torchaudio==0.11.0 \
+    torch==1.12.1+cu113 \
+    torchvision==0.13.1+cu113 \
+    torchaudio==0.12.1 \
     --extra-index-url https://download.pytorch.org/whl/cu113 
+
+# Install OVGNet dependency
+RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/ \
+    && export SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True \
+    && pip3 install -r requirements.txt
 
 # Install necessary GroundingDino dependency
 RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/groundingdino \
@@ -100,11 +106,6 @@ RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/test_vg/Open-GroundingDino \
     && cd /home/$USERNAME/catkin_ws/src/OVGNet/test_vg/Open-GroundingDino/models/GroundingDINO/ops \
     && python3 setup.py build install \
     && python3 test.py
-
-# Install OVGNet dependency
-RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/ \
-    && export SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True \
-    && pip3 install -r requirements.txt
 
 # Source ROS environment
 RUN source /opt/$USERNAME/$ROS_DISTRO/setup.bash \
