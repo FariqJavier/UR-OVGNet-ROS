@@ -79,8 +79,7 @@ RUN conda create -n python3.9-env python=3.9 -y \
     && conda activate python3.9-env
 
 # Install PyTorch suitable for CUDA 11.3
-RUN pip3 install \ 
-    torch==1.12.1+cu113 \
+RUN pip3 install torch==1.12.1+cu113 \
     torchvision==0.13.1+cu113 \
     torchaudio==0.12.1 \
     --extra-index-url https://download.pytorch.org/whl/cu113 
