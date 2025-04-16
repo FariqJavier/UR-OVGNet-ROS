@@ -17,5 +17,28 @@ ovgrasping
 
 tolerance
 log_rs
+build
+dist
+*.egg-info
+*.o
+*.so
+*.egg
+*.npy
+*.npz
+*.ipynb
+
+*.ipynb
+**/.ipynb_checkpoints/**
+*.npy
+*.npz
+**/.vscode/**
+**/grasp_label*/**
+**/log*/**
+**/dump*/**
+**/build/**
+*.o
+*.so
+*.egg
+**/*.egg-info/**
 
 __pycache__/
