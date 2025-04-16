@@ -1,5 +1,39 @@
 ### UR-OVGNet-ROS
 
+## Requirements !!!
+
+# Add Assets
+
+```bash
+$ mv assets workspace/noetic_src/OVGNet/
+```
+
+# Add Checkpoint (OVGANet, GroundingDino, Graspnet)
+
+```bash
+$ mv checkpoint workspace/noetic_src/OVGNet/
+```
+
+```bash
+$ mv checkpoint workspace/noetic_src/graspnet-ros/src/logs/logs_rs/
+```
+
+# Add OVGrasping
+
+```bash
+$ mv ovgrasping workspace/noetic_src/OVGNet/test_vg/datasets/
+```
+
+# Add Tolerance
+
+```bash
+$ mv tolerance workspace/noetic_src/OVGNet/graspnet/graspnet/dataset/
+```
+
+```bash
+$ mv tolerance workspace/noetic_src/graspnet-ros/src/dataset/
+```
+
 ## Build Docker Images
 
 ```bash
