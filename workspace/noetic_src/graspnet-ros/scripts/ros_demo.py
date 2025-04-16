@@ -4,6 +4,14 @@
     Author: chenxi-wang
 """
 
+import sys
+import os
+import traceback
+
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+SRC_PATH = os.path.abspath(os.path.join(SCRIPT_DIR, '..', 'src'))
+sys.path.append(SRC_PATH)
+
 import rospy
 import cv2
 import numpy as np
@@ -16,9 +24,7 @@ from models.graspnet import GraspNet, pred_decode
 from utils.collision_detector import ModelFreeCollisionDetector
 from utils.data_utils import CameraInfo as GraspCameraInfo, create_point_cloud_from_depth_image
 from PIL import Image as PILImage
-import os
 import message_filters
-
 
 class GraspNetNode:
     def __init__(self):
@@ -66,7 +72,7 @@ class GraspNetNode:
         sync = message_filters.ApproximateTimeSynchronizer([color_sub, depth_sub], queue_size=10, slop=0.1)
         sync.registerCallback(self.synced_image_callback)
 
-        rospy.Subscriber('/camera/color/camera_info', CameraInfo, self.camera_info_callback, queue_size=1)
+        rospy.Subscriber('/camera/depth/camera_info', CameraInfo, self.camera_info_callback, queue_size=1)
         
 
     def camera_info_callback(self, msg):
@@ -109,7 +115,7 @@ class GraspNetNode:
             camera = GraspCameraInfo(
                 width=self.camera_info.width,
                 height=self.camera_info.height,
-                fx=fx, fy=fy, cx=cx, cy=cy, factor_depth=self.factor_depth
+                fx=fx, fy=fy, cx=cx, cy=cy, scale=self.factor_depth
             )
 
             cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
@@ -117,7 +123,6 @@ class GraspNetNode:
             mask = (depth > 0)
             if self.workspace_mask is not None:
                 mask &= self.workspace_mask
-
             cloud_masked = cloud[mask]
             color_masked = color[mask]
 
@@ -146,10 +151,24 @@ class GraspNetNode:
             pc.points = o3d.utility.Vector3dVector(cloud_masked.astype(np.float32))
             pc.colors = o3d.utility.Vector3dVector(color_masked.astype(np.float32))
             grippers = gg.to_open3d_geometry_list()
-            o3d.visualization.draw_geometries([pc, *grippers])
+            if not hasattr(self, 'vis'):
+                self.vis = o3d.visualization.Visualizer()
+                self.vis.create_window(window_name='GraspNet Live', width=640, height=480)
+                self.vis.add_geometry(pc)
+                for g in grippers:
+                    self.vis.add_geometry(g)
+            else:
+                self.vis.clear_geometries()
+                self.vis.add_geometry(pc)
+                for g in grippers:
+                    self.vis.add_geometry(g)
+            self.vis.poll_events()
+            self.vis.update_renderer()
 
-        except Exception as e:
-            rospy.logerr(f"Processing error: {e}")
+        except Exception:
+            rospy.logerr("Processing error:")
+            rospy.logerr(traceback.format_exc())
+
 
     def get_grasps(self, end_points):
         with torch.no_grad():
