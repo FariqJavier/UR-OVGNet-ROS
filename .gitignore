@@ -5,17 +5,17 @@ workspace/noetic_src/OVGNet/groundingdino/build/temp.linux-x86_64-cpython-39/hom
 workspace/noetic_src/OVGNet/groundingdino/groundingdino.egg-info/
 workspace/noetic_src/OVGNet/groundingdino/_C.cpython-39-x86_64-linux-gnu.so
 
-workspace/noetic_src/OVGNet/assets
-workspace/noetic_src/OVGNet/checkpoint
-workspace/noetic_src/OVGNet/training_output
-workspace/noetic_src/OVGNet/dataset/tolerance
-workspace/noetic_src/OVGNet/test_vg/checkpoint
-workspace/noetic_src/OVGNet/test_vg/finetune_training
-workspace/noetic_src/OVGNet/test_vg/finetune2_training
-workspace/noetic_src/OVGNet/test_vg/scratch_training
-workspace/noetic_src/OVGNet/test_vg/test_result
-workspace/noetic_src/OVGNet/test_vg/train_result
+assets
+training_output
+checkpoint
+finetune_training
+finetune2_training
+scratch_training
+test_result
+train_result
+ovgrasping
 
-workspace/noetic_src/OVGNet/test_vg/datasets/ovgrasping
+tolerance
+log_rs
 
 __pycache__/
