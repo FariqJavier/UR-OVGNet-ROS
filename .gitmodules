@@ -4,3 +4,6 @@
 [submodule "workspace/noetic_src/OVGNet/test_vg/Open-GroundingDino"]
 	path = workspace/noetic_src/OVGNet/test_vg/Open-GroundingDino
 	url = https://github.com/longzw1997/Open-GroundingDino.git
+[submodule "workspace/noetic_src/realsense-ros"]
+	path = workspace/noetic_src/realsense-ros
+	url = https://github.com/IntelRealSense/realsense-ros.git
