@@ -5,6 +5,7 @@ services:
     build:
         context: ../workspace
         dockerfile: ../ros_docker_setup/Dockerfile.noetic
+        shm_size: '32gb'
         args:
           USER_ID: ${USER_ID:-1000}
           GROUP_ID: ${GROUP_ID:-1000}
@@ -23,6 +24,15 @@ services:
        - ../workspace/noetic_src:/home/ros/catkin_ws/src
        - ../data/noetic:/home/ros/data
        - /dev:/dev
+    devices: 
+       - /dev/dri:/dev/dri
+       - /dev/video0:/dev/video0
+       - /dev/video1:/dev/video1
+       - /dev/video2:/dev/video2
+       - /dev/video3:/dev/video3
+       - /dev/video4:/dev/video4
+       - /dev/video5:/dev/video5
+       - /dev/bus/usb:/dev/bus/usb
     deploy:
       resources:
         reservations:

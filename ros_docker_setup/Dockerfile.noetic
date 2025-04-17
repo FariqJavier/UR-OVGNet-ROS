@@ -23,8 +23,7 @@ RUN apt-get update \
     iputils-ping \
     python3-pip \
     python3-catkin-tools \
-    python3-rosdep \
-    && rm -rf /var/lib/apt/lists/*
+    python3-rosdep
 
 # Setup ROS repositories
 RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
@@ -50,7 +49,7 @@ RUN conda create -n python3.9-env python=3.9 -y \
     && conda activate python3.9-env
 
 # Install necessary ROS python 
-RUN pip install rospkg catkin_pkg empy
+RUN pip3 install rospkg empy==3.3.2
 
 # Create the "ros" user with the host user's IDs
 ARG USER_ID=1000
@@ -81,10 +80,24 @@ WORKDIR /home/$USERNAME/catkin_ws
 # Copy code into workspace
 COPY --chown=$USERNAME ./noetic_src src
 
+RUN sudo mkdir -p /etc/apt/keyrings \
+    && curl -sSf https://librealsense.intel.com/Debian/librealsense.pgp | sudo tee /etc/apt/keyrings/librealsense.pgp > /dev/null \
+    && sudo apt-get install -y apt-transport-https \
+    && echo "deb [signed-by=/etc/apt/keyrings/librealsense.pgp] https://librealsense.intel.com/Debian/apt-repo `lsb_release -cs` main" | sudo tee /etc/apt/sources.list.d/librealsense.list \
+    && sudo apt-get update \
+    && sudo apt-get install -y \
+        usbutils \
+        librealsense2-utils \
+        librealsense2-dev \
+        librealsense2-dbg \
+    && sudo apt-get upgrade -y \
+    && sudo rm -rf /var/lib/apt/lists/*
+
+# Configure User access to realsense devices
+RUN sudo usermod -a -G plugdev $USERNAME
+
 # Install PyTorch suitable for CUDA 11.3
-RUN pip3 install torch==1.12.1+cu113 \
-    torchvision==0.13.1+cu113 \
-    torchaudio==0.12.1 \
+RUN pip3 install torch==1.12.1+cu113 torchvision==0.13.1+cu113 torchaudio==0.12.1 \
     --extra-index-url https://download.pytorch.org/whl/cu113 
 
 # Install OVGNet dependency
@@ -102,6 +115,11 @@ RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/graspnet/graspnet/pointnet2 \
     && cd /home/$USERNAME/catkin_ws/src/OVGNet/graspnet/graspnet/knn \
     && python3 setup.py install
 
+RUN cd /home/$USERNAME/catkin_ws/src/graspnet-ros/src/pointnet2 \
+    && python3 setup.py install \
+    && cd /home/$USERNAME/catkin_ws/src/graspnet-ros/src/knn \
+    && python3 setup.py install
+
 # Install Open-GroundingDino for test Visual Grounding implementation
 RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/test_vg/Open-GroundingDino \
     && pip3 install -r requirements.txt \
@@ -109,21 +127,21 @@ RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/test_vg/Open-GroundingDino \
     && python3 setup.py build install \
     && python3 test.py
 
-# Source ROS environment
-RUN source /opt/$USERNAME/$ROS_DISTRO/setup.bash \
-    && cd /home/$USERNAME/catkin_ws \
-    && rosdep init && rosdep update \
-    && catkin init 
+# Roundabout ffi_pointer_error, version libffi_base_7.0
+RUN echo 'export LD_LIBRARY_PATH=/home/$USERNAME/miniconda3/envs/python3.9-env/lib:$LD_LIBRARY_PATH' >> /home/$USERNAME/.bashrc \
+    && ln -sf /usr/lib/x86_64-linux-gnu/libffi.so.7 /home/ros/miniconda3/envs/python3.9-env/lib/libffi.so.7
 
-# Install dependencies and build workspace
-RUN source /opt/$USERNAME/$ROS_DISTRO/setup.bash \
+# Source ROS environment
+RUN conda activate python3.9-env \
+    && cd /home/$USERNAME/catkin_ws \
+    && catkin init \
+    && rosdep init && rosdep update \
     && sudo apt-get update \
-    && rosdep update \
     && rosdep install --from-paths . --ignore-src -r -y --rosdistro=$ROS_DISTRO \
-    && catkin build 
+    && catkin build
 
 RUN sudo apt-get update \
     && sudo apt-get upgrade -y \
     && echo 'source /opt/$USERNAME/$ROS_DISTRO/setup.bash' >> /home/$USERNAME/.bashrc \
-    && echo 'source /home/$USERNAME/miniconda3/bin/activate' >> /home/$USERNAME/.bashrc \
-    && echo 'source /home/$USERNAME/catkin_ws/devel/setup.bash' >> /home/$USERNAME/.bashrc
+    && echo 'source /home/$USERNAME/catkin_ws/devel/setup.bash' >> /home/$USERNAME/.bashrc \
+    && echo 'source /home/$USERNAME/miniconda3/bin/activate' >> /home/$USERNAME/.bashrc
