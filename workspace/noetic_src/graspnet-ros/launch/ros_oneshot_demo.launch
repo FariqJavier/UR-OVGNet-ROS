@@ -1,0 +1,11 @@
+<launch>
+  <node pkg="graspnet-ros" type="ros_oneshot_demo.py" name="graspnet_node" output="screen">
+    <param name="checkpoint_path" value="$(find graspnet-ros)/src/logs/log_rs/checkpoint.tar"/>
+    <param name="num_point" value="20000"/>
+    <param name="num_view" value="300"/>
+    <param name="collision_thresh" value="0.01"/>
+    <param name="voxel_size" value="0.01"/>
+    <param name="data_dir" value="$(find graspnet-ros)/doc/example_data"/>
+    <param name="factor_depth" value="1000.0"/>
+  </node>
+</launch>
