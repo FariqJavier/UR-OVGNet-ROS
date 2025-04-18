@@ -87,6 +87,7 @@ RUN sudo mkdir -p /etc/apt/keyrings \
     && sudo apt-get update \
     && sudo apt-get install -y \
         usbutils \
+        librealsense2-dkms \
         librealsense2-utils \
         librealsense2-dev \
         librealsense2-dbg \
@@ -127,10 +128,6 @@ RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/test_vg/Open-GroundingDino \
     && python3 setup.py build install \
     && python3 test.py
 
-# Roundabout ffi_pointer_error, version libffi_base_7.0
-RUN echo 'export LD_LIBRARY_PATH=/home/$USERNAME/miniconda3/envs/python3.9-env/lib:$LD_LIBRARY_PATH' >> /home/$USERNAME/.bashrc \
-    && ln -sf /usr/lib/x86_64-linux-gnu/libffi.so.7 /home/ros/miniconda3/envs/python3.9-env/lib/libffi.so.7
-
 # Source ROS environment
 RUN conda activate python3.9-env \
     && cd /home/$USERNAME/catkin_ws \
@@ -139,6 +136,10 @@ RUN conda activate python3.9-env \
     && sudo apt-get update \
     && rosdep install --from-paths . --ignore-src -r -y --rosdistro=$ROS_DISTRO \
     && catkin build
+
+# Roundabout ffi_pointer_error, version libffi_base_7.0
+RUN echo 'export LD_LIBRARY_PATH=/home/$USERNAME/miniconda3/envs/python3.9-env/lib:$LD_LIBRARY_PATH' >> /home/$USERNAME/.bashrc \
+    && ln -sf /usr/lib/x86_64-linux-gnu/libffi.so.7 /home/ros/miniconda3/envs/python3.9-env/lib/libffi.so.7
 
 RUN sudo apt-get update \
     && sudo apt-get upgrade -y \
