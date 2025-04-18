@@ -1,0 +1,5 @@
+<launch>
+    <node pkg="graspnet-ros" type="image_saver.py" name="image_saver_node" output="screen">
+        <param name="output_dir" value="$(find graspnet-ros)/doc/example_data" />
+    </node>
+</launch>
