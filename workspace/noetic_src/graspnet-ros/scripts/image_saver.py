@@ -21,8 +21,8 @@ def main():
     rospy.loginfo("Images received. Saving...")
 
     try:
-        color_image = bridge.imgmsg_to_cv2(color_msg, desired_encoding='bgr8')
-        depth_image = bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
+        color_image = bridge.imgmsg_to_cv2(color_msg, desired_encoding="bgr8")
+        depth_image = bridge.imgmsg_to_cv2(depth_msg, depth_msg.encoding)
 
         fx = camera_info_msg.K[0]
         fy = camera_info_msg.K[4]
@@ -39,23 +39,29 @@ def main():
 
         cv2.imwrite(color_path, color_image)
 
-        # Handle different encodings
+        # Graspnet needs depth in meters
         if depth_image.dtype == np.uint16:
             # Depth in millimeters (RealSense/ZED/others)
-            # depth_np = depth_image.copy()
-            depth_np = (depth_image / 1000).astype(np.float32)
+            depth_np = depth_image.astype(np.float32) / 1000.0 
         elif depth_image.dtype == np.float32:
             # Depth in meters
-            # depth_np = (depth_image * 1000).astype(np.uint16)
             depth_np = depth_image.copy()
         else:
             raise ValueError("Unsupported depth image type")
+        
+        # Apply better depth filtering
+        min_depth = 0.2  # 20cm
+        max_depth = 1.5  # 1.5m
+        depth_np[(depth_np < min_depth) | (depth_np > max_depth)] = 0
+        
+        # Remove noise using morphological operations
+        kernel = np.ones((3,3), np.uint8)
+        depth_mask = (depth_np > 0).astype(np.uint8)
+        depth_mask = cv2.morphologyEx(depth_mask, cv2.MORPH_OPEN, kernel)
+        depth_np *= depth_mask
 
-        # Add this before saving depth image
-        depth_np[depth_np > 2000] = 0  # Filter out depths beyond 2 meters
-        depth_np[depth_np < 20] = 0    # Filter out depths closer than 20mm
-
-        cv2.imwrite(depth_path, depth_np)
+        np.save(os.path.join(output_dir, 'depth_ros.npy'), depth_np)  # Save as numpy array to preserve float values
+        cv2.imwrite(depth_path, (depth_np * 1000).astype(np.uint16))  # Save visualization as PNG
 
         meta = {
             'intrinsic_matrix': np.array([
@@ -63,7 +69,7 @@ def main():
                 [0,  fy, cy],
                 [0,  0,  1]
             ], dtype=np.float32),
-            'factor_depth': 1000.0  # Storing in millimeters
+            'factor_depth': 1.0  # Storing in millimeters
         }
         meta_path = os.path.join(output_dir, 'meta.mat')
         scio.savemat(meta_path, meta)
