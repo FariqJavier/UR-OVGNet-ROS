@@ -68,19 +68,24 @@ class OneShotGraspNet:
 
     def process(self):
         # load data
-        color = np.array(Image.open(os.path.join(self.data_dir, 'color_ros.png')), dtype=np.float32) / 255.0
-        depth = np.array(Image.open(os.path.join(self.data_dir, 'depth_ros.png')))
-        workspace_mask = np.array(Image.open(os.path.join(self.data_dir, 'workspace_mask.png')))
+        color = np.array(Image.open(os.path.join(self.data_dir, '2c.png')), dtype=np.float32) / 255.0
+        depth = np.array(Image.open(os.path.join(self.data_dir, '2d.png')))
+        # depth = np.load(os.path.join(self.data_dir, 'depth_ros.npy'))
+        # workspace_mask = np.array(Image.open(os.path.join(self.data_dir, 'workspace_mask.png')))
+        workspace_mask = None
         meta = scio.loadmat(os.path.join(self.data_dir, 'meta.mat'))
         intrinsic = meta['intrinsic_matrix']
         factor_depth = meta['factor_depth']
 
         # generate cloud
-        camera = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
+        # camera = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
+        camera = CameraInfo(640.0, 480.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
         cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
 
-        # mask = (depth > 20) & (depth < 2000) 
-        mask = (depth > 0)
+        mask = (depth > 20) & (depth < 2000) 
+        # min_depth = 0.2  # 20cm
+        # max_depth = 1.5  # 1.5m
+        # mask = (depth > min_depth) & (depth < max_depth)
         if workspace_mask is not None:
             mask &= workspace_mask
         cloud_masked = cloud[mask]
