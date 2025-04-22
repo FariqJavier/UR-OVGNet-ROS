@@ -19,6 +19,7 @@ from models.graspnet import GraspNet, pred_decode
 from utils.collision_detector import ModelFreeCollisionDetector
 from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image
 from PIL import Image 
+import matplotlib.pyplot as plt
 
 def normalize_depth(depth):
     depth = np.nan_to_num(depth)
@@ -37,7 +38,9 @@ class OneShotGraspNet:
         self.voxel_size = rospy.get_param('~voxel_size', 0.01)
         self.data_dir = rospy.get_param('~data_dir', 'doc/example_data')
         self.factor_depth = rospy.get_param('~factor_depth', 1000.0)
-        self.grasp_pose_path = os.path.join('~data-dir', 'demo_ros_result.png')
+        self.image_height = rospy.get_param('~image-height', 848.0)
+        self.image_width = rospy.get_param('~image-height', 480.0)
+        self.grasp_pose_path = os.path.join(self.data_dir, 'demo_ros_result.png')
 
         self.bridge = CvBridge()
 
@@ -68,28 +71,25 @@ class OneShotGraspNet:
 
     def process(self):
         # load data
-        color = np.array(Image.open(os.path.join(self.data_dir, '2c.png')), dtype=np.float32) / 255.0
-        depth = np.array(Image.open(os.path.join(self.data_dir, '2d.png')))
-        # depth = np.load(os.path.join(self.data_dir, 'depth_ros.npy'))
-        # workspace_mask = np.array(Image.open(os.path.join(self.data_dir, 'workspace_mask.png')))
-        workspace_mask = None
+        color = np.array(Image.open(os.path.join(self.data_dir, 'color_ros.png')), dtype=np.float32) / 255.0
+        # depth = np.array(Image.open(os.path.join(self.data_dir, 'depth_ros.png')))                                  # uncomment if use depth png
+        depth = np.load(os.path.join(self.data_dir, 'depth_ros.npy'))                                               # uncomment if use depth npy
+        workspace_mask = np.array(Image.open(os.path.join(self.data_dir, 'new_workspace_mask.png')))
+        workspace_mask = workspace_mask > 0  # Convert to boolean mask
+        # workspace_mask = None
         meta = scio.loadmat(os.path.join(self.data_dir, 'meta.mat'))
         intrinsic = meta['intrinsic_matrix']
-        factor_depth = meta['factor_depth']
 
         # generate cloud
-        # camera = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
-        camera = CameraInfo(640.0, 480.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
+        camera = CameraInfo(self.image_height, self.image_width, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], self.factor_depth)
         cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
 
-        mask = (depth > 20) & (depth < 2000) 
-        # min_depth = 0.2  # 20cm
-        # max_depth = 1.5  # 1.5m
-        # mask = (depth > min_depth) & (depth < max_depth)
-        if workspace_mask is not None:
-            mask &= workspace_mask
+        mask = (workspace_mask & (depth > 0))
         cloud_masked = cloud[mask]
         color_masked = color[mask]
+
+        # Save masked image
+        self.save_masked_color_image(color, mask)
 
         if len(cloud_masked) < 10:
             rospy.logwarn("Too few valid points!")
@@ -132,15 +132,6 @@ class OneShotGraspNet:
         vis.run()
         vis.destroy_window()
 
-        # vis.poll_events()
-        # vis.update_renderer()
-
-        # # Capture image
-        # vis.capture_screen_image(self.grasp_pose_path)
-
-        # # Clean up
-        # vis.destroy_window()
-
     def get_grasps(self, end_points):
         with torch.no_grad():
             end_points = self.net(end_points)
@@ -151,7 +142,18 @@ class OneShotGraspNet:
         detector = ModelFreeCollisionDetector(cloud, voxel_size=self.voxel_size)
         mask = detector.detect(gg, approach_dist=0.05, collision_thresh=self.collision_thresh)
         return gg[~mask]
+    
+    def save_masked_color_image(self, color, mask):
+        # Convert color image from float32 [0,1] to uint8 [0,255]
+        color_image_uint8 = (color * 255).astype(np.uint8)
 
+        # Apply mask to original color image for visualization
+        masked_color_image = np.zeros_like(color_image_uint8)
+        masked_color_image[mask] = color_image_uint8[mask]
+
+        # Save masked color image
+        cv2.imwrite(os.path.join(self.data_dir, 'color_masked.png'), cv2.cvtColor(masked_color_image, cv2.COLOR_RGB2BGR))
+        rospy.loginfo("Masked color image saved to /tmp/color_masked.png")
 
 if __name__ == '__main__':
     try:
