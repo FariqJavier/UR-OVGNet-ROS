@@ -1,0 +1,9 @@
+<launch>
+  <node pkg="graspnet-ros" type="generate_workspace_mask.py" name="resize_mask_node" output="screen">
+    <param name="output_path" value="$(find graspnet-ros)/doc/example_data/new_workspace_mask.png"/>
+    <param name="image_height" value='480'/>
+    <param name="image_width" value='848'/>
+    <!-- <param name="mask_lr" value='0.8'/>
+    <param name="mask_tb" value='0.1'/> -->
+  </node>
+</launch>
