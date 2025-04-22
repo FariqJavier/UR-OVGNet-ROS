@@ -48,17 +48,6 @@ def main():
             depth_np = depth_image.copy()
         else:
             raise ValueError("Unsupported depth image type")
-        
-        # Apply better depth filtering
-        min_depth = 0.2  # 20cm
-        max_depth = 1.5  # 1.5m
-        depth_np[(depth_np < min_depth) | (depth_np > max_depth)] = 0
-        
-        # Remove noise using morphological operations
-        kernel = np.ones((3,3), np.uint8)
-        depth_mask = (depth_np > 0).astype(np.uint8)
-        depth_mask = cv2.morphologyEx(depth_mask, cv2.MORPH_OPEN, kernel)
-        depth_np *= depth_mask
 
         np.save(os.path.join(output_dir, 'depth_ros.npy'), depth_np)  # Save as numpy array to preserve float values
         cv2.imwrite(depth_path, (depth_np * 1000).astype(np.uint16))  # Save visualization as PNG
