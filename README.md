@@ -66,27 +66,56 @@ $ sudo usermod -a -G plugdev $USERNAME
 For testing if camera is connected or not
 
 ```sh
-$ sudo realsense-viewer
-```
-
-Or run as ROOT user on the container
-
-```sh
-$ docker exec -ti --user root ros_noetic bash
-$ source devel/setup.bash
-```
-
-```sh
 $ realsense-viewer
 ```
 
+Testing camera depth
+
 ```sh
-$ roslaunch realsense2_camera rs_camera.launch
+$ rs-depth-quality
+```
+
+Find supported image resolution
+
+```sh
+$ rs-enumerate-device
+```
+
+##  Run Graspnet ROS Package
+
+Run Realsense custom node:
+(Resolution: 848x480, Align Depth: Enabled, Sync: Enabled, Allow No Texture Points: Enabled, PointCloud Ordered: Enabled)
+
+```sh
+$ roslaunch graspnet-ros custom_rs_camera.launch 
+```
+
+Run image saver:
+(Save colored image, depth image in meter, dan camera info)
+
+```sh
+$ roslaunch graspnet-ros image_saver.launch
+```
+
+Run workspace mask:
+(Adjust the mask size according to input image resolution)
+
+```sh
+$ roslaunch graspnet-ros generate_workspace_mask.launch
+```
+
+Run Graspnet Inference on input image
+(Adjust checkpoint model path, image path, image size, and depth format)
+
+```sh
+$ roslaunch graspnet-ros ros_oneshot_demo.launch
 ```
 
 ### NOTES
 
-INPUT CAMERA SIZE: [1280,720] (HARDCODED SIZE AND FIXED BASED ON WORKSPACE SIZE [1280,720])
+INPUT CAMERA SIZE: [848,480]
+
+TARGET HARUS TERLENTANG, DAN TINGGI OBJEK SAAT TERLENTANG MAKS 10 CM (LEBIH DARI ITU, REALSENSE TIDAK BISA MENDETEKSI DEPTH)
 
 TODO:
 
