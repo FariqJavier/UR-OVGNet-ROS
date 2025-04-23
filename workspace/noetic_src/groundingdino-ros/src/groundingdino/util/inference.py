@@ -98,18 +98,6 @@ def predict(
 
 
 def annotate(image_source: np.ndarray, boxes: torch.Tensor, logits: torch.Tensor, phrases: List[str]) -> np.ndarray:
-    """    
-    This function annotates an image with bounding boxes and labels.
-
-    Parameters:
-    image_source (np.ndarray): The source image to be annotated.
-    boxes (torch.Tensor): A tensor containing bounding box coordinates.
-    logits (torch.Tensor): A tensor containing confidence scores for each bounding box.
-    phrases (List[str]): A list of labels for each bounding box.
-
-    Returns:
-    np.ndarray: The annotated image.
-    """
     h, w, _ = image_source.shape
     boxes = boxes * torch.Tensor([w, h, w, h])
     xyxy = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").numpy()
@@ -121,11 +109,9 @@ def annotate(image_source: np.ndarray, boxes: torch.Tensor, logits: torch.Tensor
         in zip(phrases, logits)
     ]
 
-    bbox_annotator = sv.BoxAnnotator(color_lookup=sv.ColorLookup.INDEX)
-    label_annotator = sv.LabelAnnotator(color_lookup=sv.ColorLookup.INDEX)
+    box_annotator = sv.BoxAnnotator()
     annotated_frame = cv2.cvtColor(image_source, cv2.COLOR_RGB2BGR)
-    annotated_frame = bbox_annotator.annotate(scene=annotated_frame, detections=detections)
-    annotated_frame = label_annotator.annotate(scene=annotated_frame, detections=detections, labels=labels)
+    annotated_frame = box_annotator.annotate(scene=annotated_frame, detections=detections, labels=labels)
     return annotated_frame
 
 

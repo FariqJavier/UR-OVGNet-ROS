@@ -35,7 +35,7 @@ class FrozenBatchNorm2d(torch.nn.Module):
     BatchNorm2d where the batch statistics and the affine parameters are fixed.
 
     Copy-paste from torchvision.misc.ops with added eps before rqsrt,
-    without which any other models than torchvision.models.resnet[18,34,50,101]
+    without which any other graspnet than torchvision.graspnet.resnet[18,34,50,101]
     produce nans.
     """
 

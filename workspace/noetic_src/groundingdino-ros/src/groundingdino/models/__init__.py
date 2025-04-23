@@ -9,7 +9,7 @@ from .GroundingDINO import build_groundingdino
 
 
 def build_model(args):
-    # we use register to maintain models from catdet6 on.
+    # we use register to maintain graspnet from catdet6 on.
     from .registry import MODULE_BUILD_FUNCS
 
     assert args.modelname in MODULE_BUILD_FUNCS._module_dict

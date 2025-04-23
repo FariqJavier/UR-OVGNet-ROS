@@ -25,6 +25,7 @@ from torch import Tensor, nn
 from groundingdino.util.misc import inverse_sigmoid
 
 from .fuse_modules import BiAttentionBlock
+from .fuse_modules import TtoI
 from .ms_deform_attn import MultiScaleDeformableAttention as MSDeformAttn
 from .transformer_vanilla import TransformerEncoderLayer
 from .utils import (
@@ -35,7 +36,7 @@ from .utils import (
     gen_sineembed_for_position,
     get_sine_pos_embed,
 )
-
+import torch.nn.functional as F
 
 class Transformer(nn.Module):
     def __init__(
@@ -80,6 +81,13 @@ class Transformer(nn.Module):
         self.num_queries = num_queries
         assert query_dim == 4
 
+        # self.text_proj = MLP(256,256,256,1)
+        # self.img_proj = MLP(256,256,256,1)
+        # self.self_attn = nn.MultiheadAttention(256, 8, dropout=dropout)
+        # self.text_attn = nn.MultiheadAttention(256, 8, dropout=dropout)
+        # self.norm_img = nn.LayerNorm(256)
+        # self.norm_text_cond_img = nn.LayerNorm(256)
+
         # choose encoder layer type
         encoder_layer = DeformableTransformerEncoderLayer(
             d_model, dim_feedforward, dropout, activation, num_feature_levels, nhead, enc_n_points
@@ -104,8 +112,17 @@ class Transformer(nn.Module):
                 dropout=fusion_dropout,
                 drop_path=fusion_droppath,
             )
+            fusion_layers_a = TtoI(
+                v_dim=d_model,
+                l_dim=d_model,
+                embed_dim=dim_feedforward // 2,
+                num_heads=nhead // 2,
+                dropout=fusion_dropout,
+                drop_path=fusion_droppath,
+            )
         else:
             feature_fusion_layer = None
+            fusion_layers_a =None
 
         encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
         assert encoder_norm is None
@@ -116,6 +133,7 @@ class Transformer(nn.Module):
             num_queries=num_queries,
             text_enhance_layer=text_enhance_layer,
             feature_fusion_layer=feature_fusion_layer,
+            fusion_layers_a = fusion_layers_a,
             use_checkpoint=use_checkpoint,
             use_transformer_ckpt=use_transformer_ckpt,
         )
@@ -208,6 +226,9 @@ class Transformer(nn.Module):
     def init_ref_points(self, use_num_queries):
         self.refpoint_embed = nn.Embedding(use_num_queries, 4)
 
+    # def with_pos_embed(self, tensor, pos: Optional[Tensor]):
+    #     return tensor if pos is None else tensor + pos
+
     def forward(self, srcs, masks, refpoint_embed, pos_embeds, tgt, attn_mask=None, text_dict=None):
         """
         Input:
@@ -281,7 +302,22 @@ class Transformer(nn.Module):
         #     if memory.isnan().any() | memory.isinf().any():
         #         import ipdb; ipdb.set_trace()
 
-        if self.two_stage_type == "standard":
+        # img_query = memory + lvl_pos_embed_flatten
+        # img_query = img_query.permute(1, 0, 2)
+        # memory_text = memory_text.permute(1, 0, 2)
+        # text_info = self.self_attn(query=img_query, key=self.with_pos_embed(memory_text, None), value=memory_text,
+        #                            key_padding_mask=text_dict["text_self_attention_masks"][:, 0, :])[0]
+        # text_embed = self.text_proj(text_info)
+        # img_embed = self.img_proj(img_query)
+        # verify_score = (F.normalize(img_embed, p=2, dim=-1) * F.normalize(text_embed, p=2, dim=-1)).sum(dim=-1,
+        #                                                                                                 keepdim=True)
+        # verify_score = 1.0 * torch.exp(- (1 - verify_score).pow(2.0) / (2 * 0.5 ** 2))
+
+
+
+
+
+        if self.two_stage_type == "standard":  #把encoder的输出作为proposal
             output_memory, output_proposals = gen_encoder_output_proposals(
                 memory, mask_flatten, spatial_shapes
             )
@@ -361,8 +397,13 @@ class Transformer(nn.Module):
         #########################################################
         # Begin Decoder
         #########################################################
+
+        #memory  torch.Size([2, 16320, 256])
+
+        # import pdb;pdb.set_trace()
         hs, references = self.decoder(
             tgt=tgt.transpose(0, 1),
+            # memory=(memory.transpose(0, 1) * verify_score * 0.6) + (0.4 * memory.transpose(0, 1))
             memory=memory.transpose(0, 1),
             memory_key_padding_mask=mask_flatten,
             pos=lvl_pos_embed_flatten.transpose(0, 1),
@@ -413,6 +454,7 @@ class TransformerEncoder(nn.Module):
         enc_layer_share=False,
         text_enhance_layer=None,
         feature_fusion_layer=None,
+        fusion_layers_a=None,
         use_checkpoint=False,
         use_transformer_ckpt=False,
     ):
@@ -432,6 +474,7 @@ class TransformerEncoder(nn.Module):
         self.layers = []
         self.text_layers = []
         self.fusion_layers = []
+        self.fusion_layers_a = []
         if num_layers > 0:
             self.layers = _get_clones(encoder_layer, num_layers, layer_share=enc_layer_share)
 
@@ -442,6 +485,9 @@ class TransformerEncoder(nn.Module):
             if feature_fusion_layer is not None:
                 self.fusion_layers = _get_clones(
                     feature_fusion_layer, num_layers, layer_share=enc_layer_share
+                )
+                self.fusion_layers_a = _get_clones(
+                    fusion_layers_a, 2, layer_share=enc_layer_share
                 )
         else:
             self.layers = []
@@ -591,7 +637,21 @@ class TransformerEncoder(nn.Module):
                     level_start_index=level_start_index,
                     key_padding_mask=key_padding_mask,
                 )
-
+        for i in range(0, 2):
+            if i == 0:
+                memory_text = self.fusion_layers_a[i](
+                    v=output,
+                    l=memory_text,
+                    attention_mask_v=key_padding_mask,
+                    attention_mask_l=text_attention_mask,
+                )
+            else:
+                memory_text = self.fusion_layers_a[i](
+                    v=output,
+                    l=memory_text,
+                    attention_mask_v=key_padding_mask,
+                    attention_mask_l=text_attention_mask,
+                )
         return output, memory_text
 
 
@@ -662,6 +722,8 @@ class TransformerDecoder(nn.Module):
         reference_points = refpoints_unsigmoid.sigmoid()
         ref_points = [reference_points]
 
+        
+
         for layer_id, layer in enumerate(self.layers):
 
             if reference_points.shape[-1] == 4:
@@ -728,6 +790,8 @@ class TransformerDecoder(nn.Module):
                 ref_points.append(new_reference_points)
 
             intermediate.append(self.norm(output))
+
+        # import pdb;pdb.set_trace()
 
         return [
             [itm_out.transpose(0, 1) for itm_out in intermediate],
