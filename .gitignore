@@ -19,6 +19,8 @@ tolerance
 log_rs
 build
 dist
+weights
+
 *.egg-info
 *.o
 *.so
