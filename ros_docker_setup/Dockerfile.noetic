@@ -98,7 +98,9 @@ RUN sudo mkdir -p /etc/apt/keyrings \
 RUN sudo usermod -a -G plugdev $USERNAME
 
 # Install PyTorch suitable for CUDA 11.3
-RUN pip3 install torch==1.12.1+cu113 torchvision==0.13.1+cu113 torchaudio==0.12.1 \
+# RUN pip3 install torch==1.12.1+cu113 torchvision==0.13.1+cu113 torchaudio==0.12.1 \
+#     --extra-index-url https://download.pytorch.org/whl/cu113 
+RUN pip3 install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 \
     --extra-index-url https://download.pytorch.org/whl/cu113 
 
 # Install OVGNet dependency
@@ -108,6 +110,9 @@ RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/ \
 
 # Install necessary GroundingDino dependency
 RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/groundingdino \
+    && pip3 install -e .
+
+RUN cd /home/$USERNAME/catkin_ws/src/groundingdino-ros/src/groundingdino \
     && pip3 install -e .
 
 # Install necessary graspnet model dependency
