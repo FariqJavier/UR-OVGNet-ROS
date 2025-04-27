@@ -4,22 +4,27 @@ import cv2
 import numpy as np
 import os
 import sys
+import rospkg
 import torch
 import open3d as o3d
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image, CameraInfo
+from graspnetAPI import GraspGroup
 from std_msgs.msg import Bool
-# from graspnetAPI import GraspGroup
-# from models.graspnet import GraspNet, pred_decode
-# from utils.collision_detector import ModelFreeCollisionDetector
-# from utils.data_utils import CameraInfo as GraspCameraInfo, create_point_cloud_from_depth_image
 from PIL import Image as PILImage
 
-SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-ROOT_DIR = os.path.dirname(SCRIPT_DIR)
-sys.path.append(os.path.join(ROOT_DIR, 'src'))
+rospack = rospkg.RosPack()
 
-from custom_utils.saving_image import create_and_publish_mask, save_color_and_depth_image
+OVGNET_ROS_DIR = rospack.get_path('ovgnet-ros')
+sys.path.append(os.path.join(OVGNET_ROS_DIR, 'src'))
+
+GRASPNET_ROS_DIR = rospack.get_path('graspnet-ros') 
+sys.path.append(os.path.join(GRASPNET_ROS_DIR, 'src'))
+
+from graspnet_ros_utils.saving_image import create_and_publish_mask, save_color_and_depth_image
+from models.graspnet import GraspNet, pred_decode
+from utils.collision_detector import ModelFreeCollisionDetector
+from utils.data_utils import CameraInfo as GraspCameraInfo, create_point_cloud_from_depth_image
 
 class GraspNetNode:
     def __init__(self):
