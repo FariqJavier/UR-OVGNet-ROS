@@ -39,7 +39,7 @@ class OneShotGraspNet:
         self.data_dir = rospy.get_param('~data_dir', 'doc/example_data')
         self.factor_depth = rospy.get_param('~factor_depth', 1000.0)
         self.image_height = rospy.get_param('~image-height', 848.0)
-        self.image_width = rospy.get_param('~image-height', 480.0)
+        self.image_width = rospy.get_param('~image-width', 480.0)
         self.grasp_pose_path = os.path.join(self.data_dir, 'demo_ros_result.png')
 
         self.bridge = CvBridge()
