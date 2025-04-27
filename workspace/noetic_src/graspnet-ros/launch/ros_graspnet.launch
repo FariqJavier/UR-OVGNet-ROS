@@ -1,0 +1,9 @@
+<launch>
+  <node pkg="graspnet-ros" type="ros_graspnet.py" name="graspnet_node" output="screen">
+    <param name="output_dir" value="$(find graspnet-ros)/data"/>
+    <param name="image_height" value="480"/>
+    <param name="image_width" value="848"/>
+    <param name="mask_margin_lr" value="0.2"/>
+    <param name="mask_margin_tb" value="0.1"/>
+  </node>
+</launch>
