@@ -37,15 +37,15 @@ from groundingdino.util.utils import get_phrases_from_posmap
 from groundingdino.util.visualizer import COCOVisualizer
 from groundingdino.util.vl_utils import create_positive_map_from_span
 
-from ..registry import MODULE_BUILD_FUNCS
-from .backbone import build_backbone
-from .bertwarper import (
+from groundingdino.models.registry import MODULE_BUILD_FUNCS
+from groundingdino.models.GroundingDINO.backbone import build_backbone
+from groundingdino.models.GroundingDINO.bertwarper import (
     BertModelWarper,
     generate_masks_with_special_tokens,
     generate_masks_with_special_tokens_and_transfer_map,
 )
-from .transformer import build_transformer
-from .utils import MLP, ContrastiveEmbed, sigmoid_focal_loss
+from groundingdino.models.GroundingDINO.transformer import build_transformer
+from groundingdino.models.GroundingDINO.utils import MLP, ContrastiveEmbed, sigmoid_focal_loss
 
 
 class GroundingDINO(nn.Module):

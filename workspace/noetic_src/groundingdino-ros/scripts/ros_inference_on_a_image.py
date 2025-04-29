@@ -8,17 +8,12 @@ import sys
 from PIL import Image as PILImage, ImageDraw, ImageFont
 import numpy as np
 
-SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-SRC_PATH = os.path.abspath(os.path.join(SCRIPT_DIR, '..', 'src'))
-GROUNDINGDINO_PATH = os.path.abspath(os.path.join(SRC_PATH, '..', 'groundingdino'))
-sys.path.insert(0, GROUNDINGDINO_PATH)
-
 import torch
-import datasets.transforms as T
-from models import build_model
-from util.slconfig import SLConfig
-from util.utils import clean_state_dict, get_phrases_from_posmap
-from util.vl_utils import create_positive_map_from_span
+import groundingdino.datasets.transforms as T
+from groundingdino.models import build_model
+from groundingdino.util.slconfig import SLConfig
+from groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
+from groundingdino.util.vl_utils import create_positive_map_from_span
 
 def load_image(image_path):
     # load image
