@@ -117,7 +117,7 @@ def save_color_and_depth_image(
             ], dtype=np.float32),
             'image_size': color_image.shape[:2]
         }
-
+    
         scio.savemat(os.path.join(image_dir, f'meta_{identifier:d}.mat'), meta)  # Save metadata as .mat file
 
         # Load workspace mask
