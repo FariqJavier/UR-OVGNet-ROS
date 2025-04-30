@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 import rospy
-from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import os
 import sys
 
-from PIL import Image as PILImage, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 
 import torch
@@ -15,10 +14,11 @@ from groundingdino.util.slconfig import SLConfig
 from groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
 from groundingdino.util.vl_utils import create_positive_map_from_span
 
+# from groundingdino.util.inference import load_model, load_image, predict, annotate
+
 def load_image(image_path):
     # load image
-    # image_pil = img.convert("RGB")  # load image
-    image_pil = PILImage.open(image_path).convert("RGB")  # load image
+    image_pil = Image.open(image_path).convert("RGB")  # load image
 
     transform = T.Compose(
         [
@@ -75,17 +75,26 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
             if with_logits:
                 a = logit.max().item()
                 max_logits.append(a)
+                pred_phrases.append(pred_phrase + f"({str(logit.max().item())[:4]})")
             else:
                 pred_phrases.append(pred_phrase)
-        max_logit = max(max_logits)
-        index = max_logits.index(max_logit)
-        boxes_filt = boxes_filt[index]
+        
+        if len(pred_phrases) == 0:
+            raise ValueError("No boxes found.")
 
+        # return only object with max logit
+        if with_logits: 
+            if len(max_logits) == 0: 
+                raise ValueError("No logits found.")
+            max_logit = max(max_logits)
+            index = max_logits.index(max_logit)
+            boxes_filt = boxes_filt[index : index + 1]
+            pred_phrases = [pred_phrases[index]]
 
     else:
         # given-phrase mode
         positive_maps = create_positive_map_from_span(
-            model.tokenizer(text_prompt),
+            model.tokenizer(caption),
             token_span=token_spans
         ).to(image.device) # n_phrase, 256
 
@@ -153,58 +162,9 @@ def plot_boxes_to_image(image_pil, tgt):
 
     return image_pil, mask
 
-class GroundingDinoROSNode:
+class GroundingDinoNode:
     def __init__(self):
         rospy.init_node("grounding_dino_node")
-
-        self.image_topic = rospy.get_param("~image_topic", "/camera/color/image_raw")
-        self.text_prompt = rospy.get_param("~text_prompt", "a bottle")
-        self.config_path = rospy.get_param("~config_path")
-        self.checkpoint_path = rospy.get_param("~checkpoint_path")
-        self.output_dir = rospy.get_param("~output_dir", "/tmp/dino_ros_output")
-        os.makedirs(self.output_dir, exist_ok=True)
-
-        self.bridge = CvBridge()
-
-        # Load GroundingDINO model
-        self.model = load_model(self.config_path, self.checkpoint_path)
-
-        rospy.Subscriber(self.image_topic, Image, self.image_callback, queue_size=1)
-        rospy.loginfo("GroundingDINO node ready. Waiting for image...")
-
-    def image_callback(self, msg):
-        try:
-            # Convert to OpenCV and then PIL
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-            image_pil = PILImage.fromarray(cv_image[..., ::-1])  # Convert BGR to RGB
-
-            # Save temp image for reuse
-            temp_path = os.path.join(self.output_dir, "input.png")
-            image_pil.save(temp_path)
-
-            # Run model (reuse existing code)
-            image_pil_loaded, image_tensor = load_image(temp_path)
-            boxes, labels = get_grounding_output(
-                self.model, image_tensor, self.text_prompt,
-                box_threshold=0.3, text_threshold=0.25, cpu_only=True
-            )
-
-            # Draw results
-            output_image, mask = plot_boxes_to_image(image_pil_loaded, {
-                "boxes": boxes,
-                "labels": labels,
-                "size": [image_pil.height, image_pil.width]
-            })
-            output_path = os.path.join(self.output_dir, "result.jpg")
-            output_image.save(output_path)
-            rospy.loginfo(f"Inference complete. Result saved to {output_path}")
-
-        except Exception as e:
-            rospy.logerr(f"Error during inference: {e}")
-
-class GroundingDinoImageFileNode:
-    def __init__(self):
-        rospy.init_node("grounding_dino_file_node")
 
         self.image_path = rospy.get_param("~image_path")
         self.text_prompt = rospy.get_param("~text_prompt", "a bottle")
@@ -226,36 +186,35 @@ class GroundingDinoImageFileNode:
         try:
             if not os.path.isfile(self.image_path):
                 raise FileNotFoundError(f"Image file '{self.image_path}' not found.")
-
-            # Load the image using PIL
-            image_pil = PILImage.open(self.image_path)
-
-            # Save a temporary copy (optional)
-            temp_path = os.path.join(self.output_dir, "input_groundingdino.png")
-            image_pil.save(temp_path)
-
+            if not os.path.exists(self.config_path):
+                raise FileNotFoundError(f"Config file '{self.config_path}' not found.")
+            if not os.path.exists(self.checkpoint_path):
+                raise FileNotFoundError(f"Checkpoint file '{self.checkpoint_path}' not found.")
+            
             if self.token_spans is not None:
                 self.text_threshold = None
                 print("Using token_spans. Set the text_threshold to None.")
 
-            # Run model (reuse existing code)
-            image_pil_loaded, image_tensor = load_image(temp_path)
+            # Load the image using PIL
+            image_pil, image_tensor = load_image(self.image_path)
+
+            # visualize raw image
+            image_pil.save(os.path.join(self.output_dir, "input_groundingdino.png"))
             
             boxes, labels = get_grounding_output(
-                self.model, image_tensor, self.text_prompt,
-                self.box_threshold, self.text_threshold, cpu_only=self.cpu_only, token_spans=eval(f"{self.token_spans}")
+                model=self.model, image=image_tensor, caption=self.text_prompt,
+                box_threshold=self.box_threshold, text_threshold=self.text_threshold, with_logits=True, cpu_only=self.cpu_only, token_spans=None
             )
 
             # Draw results
             size = image_pil.size
-            output_image, mask = plot_boxes_to_image(image_pil_loaded, {
+            output_image, mask = plot_boxes_to_image(image_pil, {
                 "boxes": boxes,
                 "labels": labels,
                 "size": [size[1], size[0]],  # H,W
             })
             output_path = os.path.join(self.output_dir, "result_groundingdino.jpg")
-            image_with_box = plot_boxes_to_image(image_pil, output_image)[0]
-            image_with_box.save(output_path)
+            output_image.save(output_path)
             rospy.loginfo(f"Inference complete. Result saved to {output_path}")
 
         except Exception as e:
@@ -263,8 +222,6 @@ class GroundingDinoImageFileNode:
 
 if __name__ == "__main__":
     try:
-        # GroundingDinoROSNode()
-        # rospy.spin()
-        GroundingDinoImageFileNode()
+        GroundingDinoNode()
     except rospy.ROSInterruptException:
         pass
