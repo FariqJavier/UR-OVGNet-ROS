@@ -139,3 +139,118 @@ def save_color_and_depth_image(
         rospy.loginfo(f"Saved images and metadata to {image_dir}")
     except Exception as e:
         raise RuntimeError(f"Failed to save images: {e}")
+
+def load_color_and_depth_image(
+        input_dir: str,
+        len_subdir: int,
+        identifier: str,
+        enable_color: bool = True,
+        enable_depth: bool = False,
+        enable_camera_info: bool = False,
+        use_mask: bool = True
+    ):
+    """
+    Load color and depth images from specified paths.
+    Args:
+        input_dir (str): Directory containing the data image subdirectory set.
+        len_subdir (int): Lenght of how many data image subdirectory set.
+        identifier (str): Unique identifier for the image set.
+        enable_color (bool): Flag to load color image.
+        enable_depth (bool): Flag to load depth image.
+        enable_camera_info (bool): Flag to load camera intrinsic parameters.
+        use_mask (bool): Flag to load masked images.
+    Returns:
+        list
+    """
+    try:
+        if not os.path.isdir(input_dir):
+            raise FileNotFoundError(f"Input directory '{input_dir}' not found.")
+        if not len_subdir or len_subdir < 1:
+            raise ValueError("Invalid number of subdirectories specified.")
+        if not identifier:
+            raise ValueError("Identifier must be provided.")
+
+        color_images_paths = []
+        depth_images_paths = []
+        camera_info_paths = []
+            
+        # Process each subdirectory in order
+        for subdir_num in range(1, len_subdir + 1):  # 1 to 13
+            subdir_path = os.path.join(self.input_dir, str(subdir_num))
+
+            if not os.path.isdir(subdir_path):
+                raise FileNotFoundError(f"Subdirectory '{subdir_num}' not found in '{self.input_dir}'")
+
+            rospy.loginfo(f"Processing subdirectory: {subdir_path}")
+            
+            color_image_path = get_color_image(subdir_path, identifier, use_mask) if enable_color else None
+            depth_image_path = get_depth_image(subdir_path, identifier, use_mask) if enable_depth else None
+            camera_info_path = get_camera_info(subdir_path, identifier) if enable_camera_info else None
+
+            color_images_paths.append(color_image_path)
+            depth_images_paths.append(depth_image_path)
+            camera_info_paths.append(camera_info_path)
+
+        return color_images_paths, depth_images_paths, camera_info_paths
+
+    except Exception as e:
+        raise RuntimeError(f"Failed to load images: {e}")
+
+def get_color_image(
+    directory: str, 
+    identifier: str,
+    use_mask: str =True
+    ):
+    """
+    Get the color image path in the specified directory.
+    Args:
+        directory (str): Directory containing the data image subdirectory set.
+        identifier (str): Unique identifier for the image set.
+        use_mask (bool): Flag to load masked images.
+    Returns:
+        str: Path to the color image.
+    """
+    try:
+        prefix = 'masked' if use_mask else 'raw'
+        return color_image_path = os.path.join(directory, f'{prefix}_color_{identifier: d}.png')
+    except Exception as e:
+        raise RuntimeError(f"Failed to find masked color image: {e}")
+
+def get_depth_image(
+    directory: str, 
+    identifier: str,
+    use_mask: str =True
+    use_numpy: str =True
+    ):
+    """
+    Get the depth image path in the specified directory.
+    Args:
+        directory (str): Directory containing the data image subdirectory set.
+        identifier (str): Unique identifier for the image set.
+        use_mask (bool): Flag to load masked images.
+    Returns:
+        str: Path to the depth image.
+    """
+    try:
+        prefix = 'masked' if use_mask else 'raw'
+        depth_image_path = os.path.join(directory, f'{prefix}_depth_{identifier: d}.png') if not use_numpy else os.path.join(directory, f'{prefix}_depth_{identifier: d}.npy')
+        return depth_image_path
+    except Exception as e:
+        raise RuntimeError(f"Failed to find masked depth image: {e}")
+
+def get_camera_info(
+    directory: str, 
+    identifier: str
+    ):
+    """
+    Get the camera info path in the specified directory.
+    Args:
+        directory (str): Directory containing the data image subdirectory set.
+        identifier (str): Unique identifier for the image set.
+    Returns:
+        str: Path to the camera info file.
+    """
+    try:
+        return os.path.join(directory, f'meta_{identifier: d}.mat')
+    except Exception as e:
+        raise RuntimeError(f"Failed to find camera info file: {e}")
