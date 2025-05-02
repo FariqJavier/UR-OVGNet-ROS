@@ -3,7 +3,7 @@
     <param name="config_path" value="$(find groundingdino-ros)/src/groundingdino/config/GroundingDINO_SwinT_OGC.py" />
     <param name="checkpoint_path" value="$(find groundingdino-ros)/src/groundingdino/weights/groundingdino_swint_ogc.pth" />
     <param name="text_prompt" value="cup . brown"/>
-    <param name="image_path" value="$(find groundingdino-ros)/doc/example_data/color_ros.png"/>
-    <param name="output_dir" value="$(find groundingdino-ros)/doc/example_data"/>
+    <param name="output_dir" value="$(find ovgnet-ros)/data"/>
+    <param name="input_dir" value="$(find ovgnet-ros)/data"/>
   </node>
 </launch>
