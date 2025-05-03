@@ -65,7 +65,7 @@ class GraspNetNode:
                 margin_lr=self.mask_margin_lr,
                 margin_tb=self.mask_margin_tb,
                 output_dir=self.output_dir,
-                identifier=self.identifier
+                identifier=str(self.identifier)
             )
             rospy.loginfo("Workspace mask created and published.")
 
@@ -74,7 +74,7 @@ class GraspNetNode:
                 depth_msg=self.latest_depth,
                 camera_info_msg=self.camera_info,
                 output_dir=self.output_dir,
-                identifier=self.identifier,
+                identifier=str(self.identifier),
                 workspace_mask=self.workspace_mask
             )
             rospy.loginfo("Color and depth images saved.")
