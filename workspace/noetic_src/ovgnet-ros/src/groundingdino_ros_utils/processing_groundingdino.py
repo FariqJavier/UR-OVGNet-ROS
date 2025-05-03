@@ -1,256 +1,167 @@
 import rospy
-import sensor_msgs
 from cv_bridge import CvBridge
-import cv2
-import scipy.io as scio
 import os
+import sys
+
+from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 
-def create_and_publish_mask(
-        height: int = 450,
-        width: int = 848,
-        margin_lr: float = 0.1,  # 10% margin from sides
-        margin_tb: float = 0.1,  # 10% margin from top/bottom
-        output_dir: str = '/tmp/ros_images',
-        identifier: int = 1
-    ):
-    """
-    Create a workspace mask with a rectangular ROI
-    Args:
-        height: Height of mask (default 270)
-        width: Width of mask (default 480)
-        margin_lr: Left/right margin as a fraction of width (default 0.1)
-        margin_tb: Top/bottom margin as a fraction of height (default 0.1)
-        output_dir: Directory to save the mask image (default '/tmp/ros_images/')
-        identifier: Unique identifier for the mask image (default 'workspace_mask')
-    """
-    try:
-        # Create empty mask
-        mask = np.zeros((height, width), dtype=np.uint8)
+import torch
+import groundingdino.datasets.transforms as T
+from groundingdino.models import build_model
+from groundingdino.util.slconfig import SLConfig
+from groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
+from groundingdino.util.vl_utils import create_positive_map_from_span
+
+# from groundingdino.util.inference import load_model, load_image, predict, annotate
+
+def load_image(image_input):
+    # Check if input is a file path or numpy array
+    if isinstance(image_input, str):  # If input is a file path
+        image_pil = Image.open(image_input).convert("RGB")
+    elif isinstance(image_input, np.ndarray):  # If input is a numpy array
+        image_pil = Image.fromarray(image_input.astype('uint8')).convert("RGB")
+    else:
+        raise TypeError("Input must be either a file path or a numpy array.")
+
+    transform = T.Compose(
+        [
+            T.RandomResize([800], max_size=1333),
+            T.ToTensor(),
+            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ]
+    )
+    image, _ = transform(image_pil, None)  # 3, h, w
+    return image_pil, image
+
+
+def load_model(model_config_path, model_checkpoint_path, cpu_only=False):
+    args = SLConfig.fromfile(model_config_path)
+    args.device = "cuda" if not cpu_only else "cpu"
+    model = build_model(args)
+    checkpoint = torch.load(model_checkpoint_path, map_location="cpu")
+    load_res = model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
+    print(load_res)
+    _ = model.eval()
+    return model
+
+
+def get_grounding_output(model, image, caption, box_threshold, text_threshold=None, with_logits=True, cpu_only=False, token_spans=None):
+    assert text_threshold is not None or token_spans is not None, "text_threshould and token_spans should not be None at the same time!"
+    caption = caption.lower()
+    caption = caption.strip()
+    if not caption.endswith("."):
+        caption = caption + "."
+    device = "cuda" if not cpu_only else "cpu"
+    model = model.to(device)
+    image = image.to(device)
+    with torch.no_grad():
+        outputs = model(image[None], captions=[caption])
+    logits = outputs["pred_logits"].sigmoid()[0]  # (nq, 256)
+    boxes = outputs["pred_boxes"][0]  # (nq, 4)
+
+    # filter output
+    if token_spans is None:
+        logits_filt = logits.cpu().clone()
+        boxes_filt = boxes.cpu().clone()
+        filt_mask = logits_filt.max(dim=1)[0] > box_threshold
+        logits_filt = logits_filt[filt_mask]  # num_filt, 256
+        boxes_filt = boxes_filt[filt_mask]  # num_filt, 4 #
+
+        # get phrase
+        tokenlizer = model.tokenizer
+        tokenized = tokenlizer(caption)
+        # build pred
+        pred_phrases = []
+        max_logits = []
+        for logit, box in zip(logits_filt, boxes_filt):
+            pred_phrase = get_phrases_from_posmap(logit > text_threshold, tokenized, tokenlizer)
+            if with_logits:
+                a = logit.max().item()
+                max_logits.append(a)
+                pred_phrases.append(pred_phrase + f"({str(logit.max().item())[:4]})")
+            else:
+                pred_phrases.append(pred_phrase)
         
-        # Define workspace region (adjust these values based on your needs)
-        margin_x = int(width * margin_lr)  # 10% margin from sides
-        margin_y = int(height * margin_tb)  # 10% margin from top/bottom
+        if len(pred_phrases) == 0:
+            raise ValueError("No boxes found.")
 
-        # Create a unique subdirectory for this image
-        image_dir = os.path.join(output_dir, str(identifier))
-        os.makedirs(image_dir, exist_ok=True)
-        
-        # Create rectangle ROI
-        x1 = margin_x
-        y1 = margin_y
-        x2 = width - margin_x
-        y2 = height - margin_y
-        
-        # Fill rectangle with white (255)
-        full_mask = cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
-        
-        # Save resized mask (optional)
-        cv2.imwrite(os.path.join(image_dir, f'workspace_mask_{identifier:d}.png'), full_mask)
-        rospy.loginfo(f"Workspace mask saved to {os.path.join(image_dir, f'workspace_mask_{identifier:d}.png')}")
+        # return only object with max logit
+        if with_logits: 
+            if len(max_logits) == 0: 
+                raise ValueError("No logits found.")
+            max_logit = max(max_logits)
+            index = max_logits.index(max_logit)
+            boxes_filt = boxes_filt[index : index + 1]
+            pred_phrases = [pred_phrases[index]]
 
-        return full_mask
-    except Exception as e:
-        raise RuntimeError(f"Failed to create and save workspace mask: {e}")
+    else:
+        # given-phrase mode
+        positive_maps = create_positive_map_from_span(
+            model.tokenizer(caption),
+            token_span=token_spans
+        ).to(image.device) # n_phrase, 256
 
-def save_color_and_depth_image(
-        color_msg: sensor_msgs.msg.Image, 
-        depth_msg: sensor_msgs.msg.Image, 
-        camera_info_msg: sensor_msgs.msg.CameraInfo, 
-        output_dir: str,
-        identifier: str,
-        workspace_mask: np.ndarray = None
-    ):
-    """ 
-    Saves color and depth image to unique directories. 
-    Args:
-        color_msg (sensor_msgs.msg.Image): Color image message.
-        depth_msg (sensor_msgs.msg.Image): Depth image message.
-        camera_info_msg (sensor_msgs.msg.CameraInfo): Camera info message.
-        output_dir (str): Directory to save images.
-        identifier (str): Unique identifier for the image set.
-    """
-    try:
-        if not color_msg or not depth_msg or not camera_info_msg or not identifier:
-            raise ValueError("Received empty image messages")
-        
-        bridge = CvBridge()
+        logits_for_phrases = positive_maps @ logits.T # n_phrase, nq
+        all_logits = []
+        all_phrases = []
+        all_boxes = []
+        for (token_span, logit_phr) in zip(token_spans, logits_for_phrases):
+            # get phrase
+            phrase = ' '.join([caption[_s:_e] for (_s, _e) in token_span])
+            # get mask
+            filt_mask = logit_phr > box_threshold
+            # filt box
+            all_boxes.append(boxes[filt_mask])
+            # filt logits
+            all_logits.append(logit_phr[filt_mask])
+            if with_logits:
+                logit_phr_num = logit_phr[filt_mask]
+                all_phrases.extend([phrase + f"({str(logit.item())[:4]})" for logit in logit_phr_num])
+            else:
+                all_phrases.extend([phrase for _ in range(len(filt_mask))])
+        boxes_filt = torch.cat(all_boxes, dim=0).cpu()
+        pred_phrases = all_phrases
 
-        # Convert ROS Image messages to OpenCV images
-        color_image = bridge.imgmsg_to_cv2(color_msg, desired_encoding="bgr8")
-        depth_image = bridge.imgmsg_to_cv2(depth_msg, depth_msg.encoding)
 
-        # Get camera intrinsic parameters
-        fx = camera_info_msg.K[0]
-        fy = camera_info_msg.K[4]
-        cx = camera_info_msg.K[2]
-        cy = camera_info_msg.K[5]
+    return boxes_filt, pred_phrases
 
-        # Create a unique subdirectory for this image
-        image_dir = os.path.join(output_dir, str(identifier))
-        os.makedirs(image_dir, exist_ok=True)
+def plot_boxes_to_image(image_pil, tgt):
+    H, W = tgt["size"]
+    boxes = tgt["boxes"]
+    labels = tgt["labels"]
+    assert len(boxes) == len(labels), "boxes and labels must have same length"
 
-        # Save images
-        color_path = os.path.join(image_dir, f'raw_color_{identifier:d}.png')
-        depth_path = os.path.join(image_dir, f'raw_depth_{identifier:d}.png')
+    draw = ImageDraw.Draw(image_pil)
+    mask = Image.new("L", image_pil.size, 0)
+    mask_draw = ImageDraw.Draw(mask)
 
-        cv2.imwrite(color_path, color_image)
+    # draw boxes and masks
+    for box, label in zip(boxes, labels):
+        # from 0..1 to 0..W, 0..H
+        box = box * torch.Tensor([W, H, W, H])
+        # from xywh to xyxy
+        box[:2] -= box[2:] / 2
+        box[2:] += box[:2]
+        # random color
+        color = tuple(np.random.randint(0, 255, size=3).tolist())
+        # draw
+        x0, y0, x1, y1 = box
+        x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
 
-        # Graspnet needs depth in meters
-        if depth_image.dtype == np.uint16:
-            # Depth in millimeters (RealSense/ZED/others)
-            depth_np = depth_image.astype(np.float32) / 1000.0 
-        elif depth_image.dtype == np.float32:
-            # Depth in meters
-            depth_np = depth_image.copy()
+        draw.rectangle([x0, y0, x1, y1], outline=color, width=6)
+        # draw.text((x0, y0), str(label), fill=color)
+
+        font = ImageFont.load_default()
+        if hasattr(font, "getbbox"):
+            bbox = draw.textbbox((x0, y0), str(label), font)
         else:
-            raise ValueError("Unsupported depth image type")
+            w, h = draw.textsize(str(label), font)
+            bbox = (x0, y0, w + x0, y0 + h)
+        # bbox = draw.textbbox((x0, y0), str(label))
+        draw.rectangle(bbox, fill=color)
+        draw.text((x0, y0), str(label), fill="white")
 
-        np.save(os.path.join(image_dir, f'raw_depth_{identifier:d}.npy'), depth_np)  # Save as numpy array to preserve float values
-        cv2.imwrite(depth_path, (depth_np * 1000).astype(np.uint16))  # Save visualization as PNG
+        mask_draw.rectangle([x0, y0, x1, y1], fill=255, width=6)
 
-        meta = {
-            'intrinsic_matrix': np.array([
-                [fx, 0,  cx],
-                [0,  fy, cy],
-                [0,  0,  1]
-            ], dtype=np.float32),
-            'image_size': color_image.shape[:2]
-        }
-    
-        scio.savemat(os.path.join(image_dir, f'meta_{identifier:d}.mat'), meta)  # Save metadata as .mat file
-
-        # Load workspace mask
-        workspace_mask = workspace_mask > 0  # Convert to boolean mask
-
-        # Apply mask to original color image for visualization
-        masked_color_image = np.zeros_like(color_image)
-        masked_color_image[workspace_mask] = color_image[workspace_mask]
-
-        # Apply mask to original depth image for visualization
-        masked_depth_image = np.zeros_like(depth_image)
-        masked_depth_image[workspace_mask] = depth_image[workspace_mask]
-
-        # Save masked image
-        cv2.imwrite(os.path.join(image_dir, f'masked_color_{identifier:d}.png'), cv2.cvtColor(masked_color_image, cv2.COLOR_RGB2BGR))
-        cv2.imwrite(os.path.join(image_dir, f'masked_depth_{identifier:d}.png'), (masked_depth_image * 1000).astype(np.uint16))
-        np.save(os.path.join(image_dir, f'masked_depth_{identifier:d}.npy'), masked_depth_image)
-
-        rospy.loginfo(f"Saved images and metadata to {image_dir}")
-    except Exception as e:
-        raise RuntimeError(f"Failed to save images: {e}")
-
-def load_color_and_depth_image(
-        input_dir: str,
-        len_subdir: int,
-        identifier: str,
-        enable_color: bool = True,
-        enable_depth: bool = False,
-        enable_camera_info: bool = False,
-        use_mask: bool = True
-    ):
-    """
-    Load color and depth images from specified paths.
-    Args:
-        input_dir (str): Directory containing the data image subdirectory set.
-        len_subdir (int): Lenght of how many data image subdirectory set.
-        identifier (str): Unique identifier for the image set.
-        enable_color (bool): Flag to load color image.
-        enable_depth (bool): Flag to load depth image.
-        enable_camera_info (bool): Flag to load camera intrinsic parameters.
-        use_mask (bool): Flag to load masked images.
-    Returns:
-        list
-    """
-    try:
-        if not os.path.isdir(input_dir):
-            raise FileNotFoundError(f"Input directory '{input_dir}' not found.")
-        if not len_subdir or len_subdir < 1:
-            raise ValueError("Invalid number of subdirectories specified.")
-        if not identifier:
-            raise ValueError("Identifier must be provided.")
-
-        color_images_paths = []
-        depth_images_paths = []
-        camera_info_paths = []
-            
-        # Process each subdirectory in order
-        for subdir_num in range(1, len_subdir + 1):  # 1 to 13
-            subdir_path = os.path.join(self.input_dir, str(subdir_num))
-
-            if not os.path.isdir(subdir_path):
-                raise FileNotFoundError(f"Subdirectory '{subdir_num}' not found in '{self.input_dir}'")
-
-            rospy.loginfo(f"Processing subdirectory: {subdir_path}")
-            
-            color_image_path = get_color_image(subdir_path, identifier, use_mask) if enable_color else None
-            depth_image_path = get_depth_image(subdir_path, identifier, use_mask) if enable_depth else None
-            camera_info_path = get_camera_info(subdir_path, identifier) if enable_camera_info else None
-
-            color_images_paths.append(color_image_path)
-            depth_images_paths.append(depth_image_path)
-            camera_info_paths.append(camera_info_path)
-
-        return color_images_paths, depth_images_paths, camera_info_paths
-
-    except Exception as e:
-        raise RuntimeError(f"Failed to load images: {e}")
-
-def get_color_image(
-    directory: str, 
-    identifier: str,
-    use_mask: str =True
-    ):
-    """
-    Get the color image path in the specified directory.
-    Args:
-        directory (str): Directory containing the data image subdirectory set.
-        identifier (str): Unique identifier for the image set.
-        use_mask (bool): Flag to load masked images.
-    Returns:
-        str: Path to the color image.
-    """
-    try:
-        prefix = 'masked' if use_mask else 'raw'
-        return color_image_path = os.path.join(directory, f'{prefix}_color_{identifier: d}.png')
-    except Exception as e:
-        raise RuntimeError(f"Failed to find masked color image: {e}")
-
-def get_depth_image(
-    directory: str, 
-    identifier: str,
-    use_mask: str =True
-    use_numpy: str =True
-    ):
-    """
-    Get the depth image path in the specified directory.
-    Args:
-        directory (str): Directory containing the data image subdirectory set.
-        identifier (str): Unique identifier for the image set.
-        use_mask (bool): Flag to load masked images.
-    Returns:
-        str: Path to the depth image.
-    """
-    try:
-        prefix = 'masked' if use_mask else 'raw'
-        depth_image_path = os.path.join(directory, f'{prefix}_depth_{identifier: d}.png') if not use_numpy else os.path.join(directory, f'{prefix}_depth_{identifier: d}.npy')
-        return depth_image_path
-    except Exception as e:
-        raise RuntimeError(f"Failed to find masked depth image: {e}")
-
-def get_camera_info(
-    directory: str, 
-    identifier: str
-    ):
-    """
-    Get the camera info path in the specified directory.
-    Args:
-        directory (str): Directory containing the data image subdirectory set.
-        identifier (str): Unique identifier for the image set.
-    Returns:
-        str: Path to the camera info file.
-    """
-    try:
-        return os.path.join(directory, f'meta_{identifier: d}.mat')
-    except Exception as e:
-        raise RuntimeError(f"Failed to find camera info file: {e}")
+    return image_pil, mask
