@@ -2,6 +2,7 @@ import rospy
 import os
 import sensor_msgs
 import numpy as np
+from typing import Union
 
 from groundingdino_ros_utils.processing_groundingdino import (
     load_image,
@@ -29,7 +30,7 @@ def get_realsense_input (
     enable_depth: bool = False,
     enable_camera_info: bool = False,
     use_mask: bool = True
-    ):
+    ) -> tuple[Union[np.ndarray, None], Union[np.ndarray, None], Union[any, None]]:
     """
     Create workspace mask and capture realsense input every robot detecting motion sequence.
     Args:
@@ -82,7 +83,7 @@ def get_groundingdino_inference (
     color_image: np.ndarray,
     token_spans: str = None,
     cpu_only: bool = False
-    ):
+    ) -> tuple[Union[sensor_msgs.msg.Image, None], Union[sensor_msgs.msg.Image, None]]:
     """
     Doing inference on input image
     Args:
@@ -109,7 +110,7 @@ def get_groundingdino_inference (
         # visualize raw image
         image_pil.save(os.path.join(output_dir, "input_groundingdino.png"))
             
-        boxes, labels = get_grounding_output(
+        box_filter, pred_label = get_grounding_output(
             model=model, image=image_tensor, caption=text_prompt,
             box_threshold=box_threshold, text_threshold=text_threshold, with_logits=True, cpu_only=cpu_only, token_spans=token_spans
         )
@@ -117,14 +118,15 @@ def get_groundingdino_inference (
         # Draw results
         size = image_pil.size
         output_image, mask = plot_boxes_to_image(image_pil, {
-            "boxes": boxes,
-            "labels": labels,
+            "boxes": box_filter,
+            "labels": pred_label,
             "size": [size[1], size[0]],  # H,W
         })
         output_path = os.path.join(output_dir, "result_groundingdino.jpg")
         output_image.save(output_path)
         rospy.loginfo(f"Inference complete. Result saved to {output_path}")
-        
+
+        return box_filter, pred_label
     except Exception as e:
         raise RuntimeError(f"Failed to get groundingdino inference: {e}")
 
