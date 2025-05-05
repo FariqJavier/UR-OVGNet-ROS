@@ -323,6 +323,11 @@ def get_color_and_depth_image (
             
         # # Transform camera coordinates to world coordinates
         # point_world = np.dot(rotation_matrix_camera, point_camera) + position_camera
+        workspace_limits = np.asarray([
+            [-5.75, 5.75],  # X-axis limits based on horizontal FOV and depth
+            [-4.35, 4.35],  # Y-axis limits based on vertical FOV and depth
+            [0.2, 10.0]     # Z-axis limits based on depth range (min to max)
+        ])
 
         # Graspnet needs depth in meters
         if raw_depth_image.dtype == np.uint16:
@@ -341,6 +346,8 @@ def get_color_and_depth_image (
             'intrinsic_matrix': intrinsic_matrix,
             'position': position_camera,
             'orientation': orientation_camera,
+            'workspace_limits': workspace_limits,
+            'pixel_size': 1 / fx,
             'image_size': raw_color_image.shape[:2]
         }
     
