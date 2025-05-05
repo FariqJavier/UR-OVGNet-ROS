@@ -9,7 +9,7 @@ from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normal
 from PIL import Image
 import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
-from constants import WORKSPACE_LIMITS
+# from constants import WORKSPACE_LIMITS
 from scipy.spatial.distance import cdist
 import random
 
@@ -298,53 +298,99 @@ def get_fuse_pointcloud(env, box, color1, depth1):
 
     return fuse_pcd
 
+def get_single_fuse_pointcloud(camera_info, box_filter, color_image_np, depth_image_np):
+    # Convert box coordinates to 3D workspace bounds
+    box_filter[:2] -= box_filter[2:] / 2
+    box_filter[2:] += box_filter[:2]
+    a = box_filter.numpy()
+    xtop = [(a[0] * 0.448), (a[1] * 0.448)]
+    xdown = [(a[2] * 0.448), (a[3] * 0.448)]
+    bounds = np.asarray([[xtop[1] + 0.276, xdown[1] + 0.276], 
+                         [xtop[0] - 0.224, xdown[0] - 0.224], 
+                         [-0.0001, 0.4]])
+    
+    # Convert depth to point cloud
+    xyz = get_pointcloud(depth_image_np, camera_info["intrinsic_matrix"])
+    
+    # Transform points from camera to world coordinates
+    position = np.array(camera_info["position"]).reshape(3, 1)
+    rotation = p.getMatrixFromQuaternion(camera_info["rotation"])
+    rotation = np.array(rotation).reshape(3, 3)
+    transform = np.eye(4)
+    transform[:3, :] = np.hstack((rotation, position))
+    points = transform_pointcloud(xyz, transform)
+    
+    # Filter points within bounds
+    ix = (points[Ellipsis, 0] >= bounds[0, 0]) & (points[Ellipsis, 0] < bounds[0, 1])
+    iy = (points[Ellipsis, 1] >= bounds[1, 0]) & (points[Ellipsis, 1] < bounds[1, 1])
+    iz = (points[Ellipsis, 2] >= bounds[2, 0]) & (points[Ellipsis, 2] < bounds[2, 1])
+    valid = ix & iy & iz
+    points = points[valid]
+    colors = color_image_np[valid]
+    
+    # Create Open3D point cloud
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd.colors = o3d.utility.Vector3dVector(colors / 255.0)
+    
+    # Clean the point cloud
+    pcd.estimate_normals()
+    pcd, _ = pcd.remove_statistical_outlier(
+        nb_neighbors=reconstruction_config['nb_neighbors'],
+        std_ratio=reconstruction_config['std_ratio']
+    )
+    
+    # Optional voxel downsampling for performance
+    pcd = pcd.voxel_down_sample(reconstruction_config['voxel_size'])
+    
+    return pcd
 
-def get_true_bboxs(env, color_image, depth_image, mask_image):
-    # get mask of all objects
-    bbox_images = []
-    bbox_positions = []
-    for obj_id in env.obj_ids["rigid"]:
-        mask = np.zeros(mask_image.shape).astype(np.uint8)
-        mask[mask_image == obj_id] = 255
-        _, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-        stats = stats[stats[:, 4].argsort()]
-        if stats[:-1].shape[0] > 0:
-            bbox = stats[:-1][0]
-            # for bbox
-            # |(y0, x0)         |   
-            # |                 |
-            # |                 |
-            # |         (y1, x1)|
-            x0, y0 = bbox[0], bbox[1]
-            x1 = bbox[0] + bbox[2]
-            y1 = bbox[1] + bbox[3]
+# def get_true_bboxs(env, color_image, depth_image, mask_image, workspace_limits, pixel_size):
+#     # get mask of all objects
+#     bbox_images = []
+#     bbox_positions = []
+#     for obj_id in env.obj_ids["rigid"]:
+#         mask = np.zeros(mask_image.shape).astype(np.uint8)
+#         mask[mask_image == obj_id] = 255
+#         _, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+#         stats = stats[stats[:, 4].argsort()]
+#         if stats[:-1].shape[0] > 0:
+#             bbox = stats[:-1][0]
+#             # for bbox
+#             # |(y0, x0)         |   
+#             # |                 |
+#             # |                 |
+#             # |         (y1, x1)|
+#             x0, y0 = bbox[0], bbox[1]
+#             x1 = bbox[0] + bbox[2]
+#             y1 = bbox[1] + bbox[3]
 
-            # visualization
-            start_point, end_point = (x0, y0), (x1, y1)
-            color = (0, 0, 255) # Red color in BGR
-            thickness = 1 # Line thickness of 1 px 
-            mask_BGR = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-            mask_bboxs = cv2.rectangle(mask_BGR, start_point, end_point, color, thickness)
-            cv2.imwrite('mask_bboxs.png', mask_bboxs)
-            # cv2.imshow("1", mask_bboxs)
-            # cv2.waitKey(0)
-            # cv2.destroyAllWindows()
+#             # visualization
+#             start_point, end_point = (x0, y0), (x1, y1)
+#             color = (0, 0, 255) # Red color in BGR
+#             thickness = 1 # Line thickness of 1 px 
+#             mask_BGR = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+#             mask_bboxs = cv2.rectangle(mask_BGR, start_point, end_point, color, thickness)
+#             cv2.imwrite('mask_bboxs.png', mask_bboxs)
+#             # cv2.imshow("1", mask_bboxs)
+#             # cv2.waitKey(0)
+#             # cv2.destroyAllWindows()
 
-            bbox_image = color_image[y0:y1, x0:x1]
-            bbox_images.append(bbox_image)
+#             bbox_image = color_image[y0:y1, x0:x1]
+#             bbox_images.append(bbox_image)
             
-            pixel_x = (x0 + x1) // 2
-            pixel_y = (y0 + y1) // 2
-            bbox_pos = [
-                pixel_y * PIXEL_SIZE + WORKSPACE_LIMITS[0][0],
-                pixel_x * PIXEL_SIZE + WORKSPACE_LIMITS[1][0],
-                depth_image[pixel_y][pixel_x] + WORKSPACE_LIMITS[2][0],
-            ]
-            bbox_positions.append(bbox_pos)
-    # cv2.imshow("1", mask_bboxs)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
-    return bbox_images, bbox_positions
+#             pixel_x = (x0 + x1) // 2
+#             pixel_y = (y0 + y1) // 2
+#             bbox_pos = [
+#                 pixel_y * pixel_size + workspace_limits[0][0],
+#                 pixel_x * pixel_size + workspace_limits[1][0],
+#                 depth_image[pixel_y][pixel_x] + workspace_limits[2][0],
+#             ]
+#             bbox_positions.append(bbox_pos)
+#     # cv2.imshow("1", mask_bboxs)
+#     # cv2.waitKey(0)
+#     # cv2.destroyAllWindows()
+#     return bbox_images, bbox_positions
 
 
 def relabel_mask(env, mask_image):
