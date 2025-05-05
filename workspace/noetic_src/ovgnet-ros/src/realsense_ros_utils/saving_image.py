@@ -5,6 +5,9 @@ import cv2
 import scipy.io as scio
 import os
 import numpy as np
+from typing import Union
+import tf2_ros
+from tf.transformations import quaternion_multiply, quaternion_from_euler
 
 def create_and_publish_mask(
         height: int = 450,
@@ -33,10 +36,6 @@ def create_and_publish_mask(
         # Define workspace region (adjust these values based on your needs)
         margin_x = int(width * margin_lr)  # 10% margin from sides
         margin_y = int(height * margin_tb)  # 10% margin from top/bottom
-
-        # Create a unique subdirectory for this image
-        image_dir = os.path.join(output_dir, identifier)
-        os.makedirs(image_dir, exist_ok=True)
         
         # Create rectangle ROI
         x1 = margin_x
@@ -48,8 +47,8 @@ def create_and_publish_mask(
         full_mask = cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
         
         # Save resized mask (optional)
-        cv2.imwrite(os.path.join(image_dir, f'workspace_mask_{identifier}.png'), full_mask)
-        rospy.loginfo(f"Workspace mask saved to {os.path.join(image_dir, f'workspace_mask_{identifier}.png')}")
+        cv2.imwrite(os.path.join(output_dir, f'workspace_mask_{identifier}.png'), full_mask)
+        rospy.loginfo(f"Workspace mask saved to {os.path.join(output_dir, f'workspace_mask_{identifier}.png')}")
 
         return full_mask
     except Exception as e:
@@ -151,7 +150,7 @@ def load_color_and_depth_image(
         enable_camera_info: bool = False,
         use_mask: bool = True,
         use_numpy_depth: bool = True
-    ) -> tuple[str | None, str | None, str | None]:
+    ) -> tuple[Union[str, None], Union[str, None], Union[str, None]]:
     """
     Load color and depth images from specified paths.
     Args:
@@ -250,7 +249,7 @@ def get_color_and_depth_image (
     enable_depth: bool = False,
     enable_camera_info: bool = False,
     use_mask: bool = True,
-    ) -> tuple[np.ndarray | None, np.ndarray | None, any | None]:
+    ) -> tuple[Union[np.ndarray, None], Union[np.ndarray, None], Union[any, None]]:
     """
     Get and save color and depth images from specified paths.
     Args:
@@ -267,6 +266,11 @@ def get_color_and_depth_image (
     Returns:
         Tuple: Paths to the color image, depth image, and camera info path.
     """
+
+    # Setup TF listener
+    tfBuffer = tf2_ros.Buffer()
+    listener = tf2_ros.TransformListener(tfBuffer)
+
     try:
         if not color_msg or not depth_msg or not camera_info_msg:
             raise ValueError("Received empty image messages")
@@ -281,17 +285,44 @@ def get_color_and_depth_image (
         raw_color_image = bridge.imgmsg_to_cv2(color_msg, desired_encoding="bgr8")
         raw_depth_image = bridge.imgmsg_to_cv2(depth_msg, depth_msg.encoding)
 
+         # Save images
+        raw_color_path = os.path.join(output_dir, f'raw_color_{identifier}.png')
+        raw_depth_path = os.path.join(output_dir, f'raw_depth_{identifier}.png')
+        cv2.imwrite(raw_color_path, raw_color_image)
+
         # Get camera intrinsic parameters
         fx = camera_info_msg.K[0]
         fy = camera_info_msg.K[4]
         cx = camera_info_msg.K[2]
         cy = camera_info_msg.K[5]
+        intrinsic_matrix = np.array([
+            [fx, 0,  cx],
+            [0,  fy, cy],
+            [0,  0,  1]
+        ], dtype=np.float32)
+        intrinsic_matrix_inv = np.linalg.inv(intrinsic_matrix)
 
-        # Save images
-        raw_color_path = os.path.join(output_dir, f'raw_color_{identifier}.png')
-        raw_depth_path = os.path.join(output_dir, f'raw_depth_{identifier}.png')
-
-        cv2.imwrite(raw_color_path, raw_color_image)
+        # # Example pixel coordinates
+        # u, v = (raw_depth_image.shape[1] / 2), (raw_depth_image.shape[0] / 2)  # Center pixel of the image
+        
+        # # Get depth at (u, v)
+        # center_raw_depth_value = raw_depth_image[v, u]  # Get the depth value at pixel (u, v)
+        
+        # # Convert pixel (u, v) and depth to camera coordinates
+        # point_camera = np.dot(intrinsic_matrix_inv, np.array([u * center_raw_depth_value, v * center_raw_depth_value, center_raw_depth_value]))
+        
+        # Get transformation from camera_link to base_link (or robot base)
+        transform = tfBuffer.lookup_transform('base_link', 'camera_link', rospy.Time(0))
+        position_camera = np.array([transform.transform.translation.x,
+                                    transform.transform.translation.y,
+                                    transform.transform.translation.z])
+        orientation_camera = np.array([transform.transform.rotation.x,
+                                            transform.transform.rotation.y,
+                                            transform.transform.rotation.z,
+                                            transform.transform.rotation.w])
+            
+        # # Transform camera coordinates to world coordinates
+        # point_world = np.dot(rotation_matrix_camera, point_camera) + position_camera
 
         # Graspnet needs depth in meters
         if raw_depth_image.dtype == np.uint16:
@@ -307,12 +338,10 @@ def get_color_and_depth_image (
         cv2.imwrite(raw_depth_path, (depth_np * 1000).astype(np.uint16))  # Save visualization as PNG
 
         meta = {
-            'intrinsic_matrix': np.array([
-                [fx, 0,  cx],
-                [0,  fy, cy],
-                [0,  0,  1]
-            ], dtype=np.float32),
-            'image_size': color_image.shape[:2]
+            'intrinsic_matrix': intrinsic_matrix,
+            'position': position_camera,
+            'orientation': orientation_camera,
+            'image_size': raw_color_image.shape[:2]
         }
     
         scio.savemat(os.path.join(output_dir, f'meta_{identifier}.mat'), meta)  # Save metadata as .mat file
