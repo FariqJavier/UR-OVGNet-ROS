@@ -271,6 +271,10 @@ def get_color_and_depth_image (
     tfBuffer = tf2_ros.Buffer()
     listener = tf2_ros.TransformListener(tfBuffer)
 
+
+    # # Wait for the transform to be available
+    # rospy.sleep(1.0)  # Ensure TF2 has time to populate the buffer
+
     try:
         if not color_msg or not depth_msg or not camera_info_msg:
             raise ValueError("Received empty image messages")
@@ -312,7 +316,7 @@ def get_color_and_depth_image (
         # point_camera = np.dot(intrinsic_matrix_inv, np.array([u * center_raw_depth_value, v * center_raw_depth_value, center_raw_depth_value]))
         
         # Get transformation from camera_link to base_link (or robot base)
-        transform = tfBuffer.lookup_transform('base_link', 'camera_link', rospy.Time(0))
+        transform = tfBuffer.lookup_transform('base_link', 'camera_link', rospy.Time(0), rospy.Duration(1.0))
         position_camera = np.array([transform.transform.translation.x,
                                     transform.transform.translation.y,
                                     transform.transform.translation.z])
