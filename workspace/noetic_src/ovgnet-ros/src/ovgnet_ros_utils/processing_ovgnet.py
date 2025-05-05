@@ -3,6 +3,7 @@ import os
 import sensor_msgs
 import numpy as np
 from typing import Union
+from torch import Tensor
 
 from groundingdino_ros_utils.processing_groundingdino import (
     load_image,
@@ -15,6 +16,9 @@ from realsense_ros_utils.saving_image import (
     create_and_publish_mask,
     get_color_and_depth_image
 )
+
+from graspnet_ros_utils.grasp_detector import Graspnet
+from graspnet_ros_utils.processing_graspnet import get_single_fuse_pointcloud
 
 def get_realsense_input (
     color_msg: sensor_msgs.msg.Image, 
@@ -130,10 +134,49 @@ def get_groundingdino_inference (
     except Exception as e:
         raise RuntimeError(f"Failed to get groundingdino inference: {e}")
 
+def get_graspnet_inference (
+    checkpoint_path: str,
+    refine_approach_dist: float,
+    dist_thresh: float,
+    angle_thresh: int,
+    mask_thresh: float,
+    color_image: np.ndarray,
+    depth_image: np.ndarray,
+    camera_info: any,
+    box_filter: Tensor
+    ):
+    """
+    Run GraspNet prediction on the point cloud
     
+    Args:
+        pcd: Open3D point cloud
+        graspnet_config: Configuration for GraspNet
+    
+    Returns:
+        grasp_poses: Predicted grasp poses
+    """
+    try:
+        # Initialize Graspnet
+        graspnet = Graspnet(
+            checkpoint_path=checkpoint_path,
+            refine_approach_dist=refine_approach_dist,
+            dist_thresh=dist_thresh,
+            angle_thresh=angle_thresh,
+            mask_thresh=mask_thresh
+        )
 
-# def get_graspnet_inference ():
+        # Get pointcloud from input image
+        pcd = get_single_fuse_pointcloud(
+            camera_info=color_image,
+            color_image_np=depth_image,
+            depth_image_np=camera_info,
+            box_filter=box_filter,
+        )
 
+    except Exception as e:
+        raise RuntimeError(f"Failed to get graspnet inference: {e}")
+
+    
 
 # def save_graspnet_inference ():
 
