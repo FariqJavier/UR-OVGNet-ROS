@@ -12,6 +12,10 @@ from sensor_msgs.msg import Image, CameraInfo
 from graspnetAPI import GraspGroup
 from std_msgs.msg import Bool
 from PIL import Image as PILImage
+import threading
+import queue
+import time
+import copy
 
 rospack = rospkg.RosPack()
 
@@ -50,55 +54,77 @@ class OVGNetNode:
         os.makedirs(self.output_dir, exist_ok=True)
         self.identifier = 0
 
-    def camera_status_callback(self, msg):
-        if self.latest_color is None or self.latest_depth is None or self.camera_info is None:
-            rospy.logwarn("Waiting for color, depth, and camera info messages ...")
-            return
-        if self.config_path is None or self.checkpoint_path is None or self.output_dir is None:
-            rospy.logerr("Cannot find required path ...")
-            return
-        if self.text_prompt is None:
-            rospy.logerr("Text prompt need to be specified ...")
+        # Check if GPU is available
+        self.use_gpu = torch.cuda.is_available() and not self.cpu_only
+        if self.use_gpu:
+            device_count = torch.cuda.device_count()
+            self.device = torch.device('cuda:0')
+            rospy.loginfo(f"Using GPU acceleration. Available devices: {device_count}")
+        else:
+            self.device = torch.device('cpu')
+            rospy.loginfo("Using CPU for inference")
+
+        # Create processing queue and worker thread
+        self.processing_queue = queue.Queue(maxsize=5)  # Limit queue size to prevent memory buildup
+        self.worker_thread = threading.Thread(target=self.processing_worker)
+        self.worker_thread.daemon = True  # Thread will exit when main program exits
+        self.worker_thread.start()
         
-        try:
-            if msg.data == True:
-                self.identifier += 1
+        # Add a rate limiter to prevent overwhelming the queue
+        self.last_enqueue_time = 0
+        self.min_enqueue_interval = 1.0  # Minimum seconds between enqueueing new frames
 
-            if msg.data == False:
-                self.identifier = 1
+    # def camera_status_callback(self, msg):
+    #     if self.latest_color is None or self.latest_depth is None or self.camera_info is None:
+    #         rospy.logwarn("Waiting for color, depth, and camera info messages ...")
+    #         return
+    #     if self.config_path is None or self.checkpoint_path is None or self.output_dir is None:
+    #         rospy.logerr("Cannot find required path ...")
+    #         return
+    #     if self.text_prompt is None:
+    #         rospy.logerr("Text prompt need to be specified ...")
+        
+    #     try:
+    #         if msg.data == True:
+    #             self.identifier += 1
 
-            color_image_np, depth_image_np, camera_info = get_realsense_input (
-                color_msg = self.latest_color,
-                depth_msg = self.latest_depth,
-                camera_info_msg = self.camera_info, 
-                image_height = self.image_height,
-                image_width = self.image_width,
-                ws_margin_lr = self.mask_margin_lr,
-                ws_margin_tb = self.mask_margin_tb,
-                output_dir = os.path.join(self.output_dir, str(self.identifier)),
-                identifier = str(self.identifier),
-                enable_color = self.enable_color,
-                enable_depth = self.enable_depth,
-                enable_camera_info = self.camera_info,
-                use_mask = self.use_mask
-            )
-            rospy.loginfo("Getting input from Intel Realsense D455 ...")
+    #         if msg.data == False:
+    #             self.identifier = 0
+    #             rospy.loginfo("Processing image finished")
+    #             return
 
-            box_filter, pred_label = get_groundingdino_inference (
-                config_path = self.config_path,
-                checkpoint_path = self.checkpoint_path,
-                text_prompt = self.text_prompt,
-                box_threshold = self.box_threshold,
-                text_threshold = self.text_threshold,
-                output_dir = os.path.join(self.output_dir, str(self.identifier)),
-                color_image = color_image_np,
-                token_spans = self.token_spans,
-                cpu_only = self.cpu_only
-            )
-            rospy.loginfo("Getting groundingdino inference")
-        except Exception as e:
-            rospy.logerr(f"Failed to save images: {e}")
-            return
+    #         color_image_np, depth_image_np, camera_info = get_realsense_input (
+    #             color_msg = self.latest_color,
+    #             depth_msg = self.latest_depth,
+    #             camera_info_msg = self.camera_info, 
+    #             image_height = self.image_height,
+    #             image_width = self.image_width,
+    #             ws_margin_lr = self.mask_margin_lr,
+    #             ws_margin_tb = self.mask_margin_tb,
+    #             output_dir = os.path.join(self.output_dir, str(self.identifier)),
+    #             identifier = str(self.identifier),
+    #             enable_color = self.enable_color,
+    #             enable_depth = self.enable_depth,
+    #             enable_camera_info = self.camera_info,
+    #             use_mask = self.use_mask
+    #         )
+    #         rospy.loginfo("Getting input from Intel Realsense D455 ...")
+
+    #         box_filter, pred_label = get_groundingdino_inference (
+    #             config_path = self.config_path,
+    #             checkpoint_path = self.checkpoint_path,
+    #             text_prompt = self.text_prompt,
+    #             box_threshold = self.box_threshold,
+    #             text_threshold = self.text_threshold,
+    #             output_dir = os.path.join(self.output_dir, str(self.identifier)),
+    #             color_image = color_image_np,
+    #             token_spans = self.token_spans,
+    #             cpu_only = self.cpu_only
+    #         )
+    #         rospy.loginfo("Getting groundingdino inference")
+    #     except Exception as e:
+    #         rospy.logerr(f"Failed to save images: {e}")
+    #         return
 
     def camera_info_callback(self, msg):
         self.camera_info = msg
@@ -108,6 +134,153 @@ class OVGNetNode:
 
     def depth_callback(self, msg):
         self.latest_depth = msg
+
+    def camera_status_callback(self, msg):
+        # Skip processing if we don't have all the data yet
+        if self.latest_color is None or self.latest_depth is None or self.camera_info is None:
+            rospy.logwarn("Waiting for color, depth, and camera info messages ...")
+            return
+            
+        # Skip processing if required paths are missing
+        if self.config_path is None or self.checkpoint_path is None or self.output_dir is None:
+            rospy.logerr("Cannot find required path ...")
+            return
+            
+        # Skip processing if text prompt is missing
+        if self.text_prompt is None:
+            rospy.logerr("Text prompt need to be specified ...")
+            return
+        
+        # Handle the message
+        if msg.data == True:
+            # Check if queue is full
+            if self.processing_queue.full():
+                rospy.logwarn("Processing queue is full, skipping frame")
+                return
+                
+            # Implement rate limiting
+            current_time = time.time()
+            if current_time - self.last_enqueue_time < self.min_enqueue_interval:
+                rospy.loginfo("Rate limiting: skipping this frame")
+                return
+                
+            self.identifier += 1
+            
+            # Create copies of the messages
+            color_msg_copy = copy.deepcopy(self.latest_color)
+            depth_msg_copy = copy.deepcopy(self.latest_depth)
+            camera_info_copy = copy.deepcopy(self.camera_info)
+            
+            # Add to processing queue
+            try:
+                self.processing_queue.put((self.identifier, color_msg_copy, depth_msg_copy, camera_info_copy), 
+                                         block=False)  # Non-blocking to avoid hanging if queue is full
+                self.last_enqueue_time = current_time
+                rospy.loginfo(f"Enqueued frame {self.identifier} for processing")
+            except queue.Full:
+                rospy.logwarn("Queue is full, dropping frame")
+            
+        elif msg.data == False:
+            self.identifier = 0
+            rospy.loginfo("Processing image finished")
+            return
+
+    def processing_worker(self):
+        """Worker function that runs in a separate thread to process frames"""
+        while not rospy.is_shutdown():
+            try:
+                # Get task from queue, blocks until an item is available
+                task = self.processing_queue.get(timeout=1.0)
+                
+                # Unpack the task data
+                identifier, color_msg, depth_msg, camera_info_msg = task
+                
+                # Process the frame (moved from camera_status_callback)
+                self.process_frame(identifier, color_msg, depth_msg, camera_info_msg)
+                
+                # Mark task as done
+                self.processing_queue.task_done()
+                
+            except queue.Empty:
+                # Timeout on queue.get, just continue the loop
+                continue
+            except Exception as e:
+                rospy.logerr(f"Error in worker thread: {e}")
+
+    def process_frame(self, identifier, color_msg, depth_msg, camera_info_msg):
+        """Process a single frame with all the detection logic"""
+        try:
+            rospy.loginfo(f"Processing frame {identifier}")
+            
+            color_image_np, depth_image_np, camera_info = get_realsense_input(
+                color_msg=color_msg,
+                depth_msg=depth_msg,
+                camera_info_msg=camera_info_msg,
+                image_height=self.image_height,
+                image_width=self.image_width,
+                ws_margin_lr=self.mask_margin_lr,
+                ws_margin_tb=self.mask_margin_tb,
+                output_dir=os.path.join(self.output_dir, str(identifier)),
+                identifier=str(identifier),
+                enable_color=self.enable_color,
+                enable_depth=self.enable_depth,
+                enable_camera_info=self.enable_camera_info,
+                use_mask=self.use_mask
+            )
+            rospy.loginfo(f"Frame {identifier}: Got input from Intel Realsense D455")
+            
+            box_filter, pred_label = get_groundingdino_inference(
+                config_path=self.config_path,
+                checkpoint_path=self.checkpoint_path,
+                text_prompt=self.text_prompt,
+                box_threshold=self.box_threshold,
+                text_threshold=self.text_threshold,
+                output_dir=os.path.join(self.output_dir, str(identifier)),
+                color_image=color_image_np,
+                token_spans=self.token_spans,
+                cpu_only=self.cpu_only
+            )
+
+            # # If using GPU, ensure the data is on the correct device
+            # if self.use_gpu:
+            #     # Note: This step depends on how your get_groundingdino_inference function works
+            #     # You might need to modify that function to accept a device parameter
+            #     box_filter, pred_label = get_groundingdino_inference(
+            #         config_path=self.config_path,
+            #         checkpoint_path=self.checkpoint_path,
+            #         text_prompt=self.text_prompt,
+            #         box_threshold=self.box_threshold,
+            #         text_threshold=self.text_threshold,
+            #         output_dir=os.path.join(self.output_dir, str(identifier)),
+            #         color_image=color_image_np,
+            #         token_spans=self.token_spans,
+            #         cpu_only=self.cpu_only,
+            #         device=self.device  # Pass device to inference function
+            #     )
+            # else:
+            #     # Original call for CPU
+            #     box_filter, pred_label = get_groundingdino_inference(
+            #         config_path=self.config_path,
+            #         checkpoint_path=self.checkpoint_path,
+            #         text_prompt=self.text_prompt,
+            #         box_threshold=self.box_threshold,
+            #         text_threshold=self.text_threshold,
+            #         output_dir=os.path.join(self.output_dir, str(identifier)),
+            #         color_image=color_image_np,
+            #         token_spans=self.token_spans,
+            #         cpu_only=self.cpu_only
+            #     )
+                
+            rospy.loginfo(f"Frame {identifier}: Completed groundingdino inference")
+
+            # Clear CUDA cache periodically to avoid memory issues
+            if self.use_gpu and identifier % 10 == 0:
+                torch.cuda.empty_cache()
+                
+        except Exception as e:
+            rospy.logerr(f"Failed to process frame {identifier}: {e}")
+            if self.use_gpu:
+                torch.cuda.empty_cache()  # Try to clear GPU memory on error
 
 
 if __name__ == '__main__':
