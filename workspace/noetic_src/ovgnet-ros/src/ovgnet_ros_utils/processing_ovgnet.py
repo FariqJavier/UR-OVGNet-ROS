@@ -151,6 +151,7 @@ def get_graspnet_inference (
     Args:
         pcd: Open3D point cloud
         graspnet_config: Configuration for GraspNet
+        box_filter (Tensor(0,4)): The first index of the bounding box generated from groundingdino
     
     Returns:
         grasp_poses: Predicted grasp poses
@@ -167,9 +168,9 @@ def get_graspnet_inference (
 
         # Get pointcloud from input image
         pcd = get_single_fuse_pointcloud(
-            camera_info=color_image,
-            color_image_np=depth_image,
-            depth_image_np=camera_info,
+            camera_info=camera_info,
+            color_image_np=color_image,
+            depth_image_np=depth_image,
             box_filter=box_filter,
         )
 
