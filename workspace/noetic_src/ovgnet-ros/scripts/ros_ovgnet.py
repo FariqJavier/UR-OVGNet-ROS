@@ -24,7 +24,8 @@ sys.path.append(os.path.join(OVGNET_ROS_DIR, 'src'))
 
 from ovgnet_ros_utils.processing_ovgnet import (
     get_realsense_input,
-    get_groundingdino_inference
+    get_groundingdino_inference,
+    get_graspnet_inference
 )
 
 class OVGNetNode:
@@ -39,23 +40,28 @@ class OVGNetNode:
         self.image_height = rospy.get_param('~image_height', 480.0)
         self.image_width = rospy.get_param('~image_width', 848.0)
         self.enable_color = rospy.get_param('~enable_color', True)
-        self.enable_depth = rospy.get_param('~enable_depth', False)
-        self.enable_camera_info = rospy.get_param('~enable_camera_info', False)
+        self.enable_depth = rospy.get_param('~enable_depth', True)
+        self.enable_camera_info = rospy.get_param('~enable_camera_info', True)
         self.use_mask = rospy.get_param('~use_mask', True)
         self.mask_margin_lr = rospy.get_param('~mask_margin_lr', 0.2)
         self.mask_margin_tb = rospy.get_param('~mask_margin_tb', 0.1)
-        self.text_prompt = rospy.get_param("~text_prompt", None)
-        self.config_path = rospy.get_param("~config_path", None)
-        self.checkpoint_path = rospy.get_param("~checkpoint_path", None)
-        self.box_threshold = rospy.get_param("~box_threshold", 0.3)
-        self.text_threshold = rospy.get_param("~text_threshold", 0.25)
-        self.token_spans = rospy.get_param("~token_spans", None)
-        self.cpu_only = rospy.get_param("~cpu-only", False)
+        self.groundingdino_text_prompt = rospy.get_param("~groundingdino_text_prompt", None)
+        self.groundingdino_config_path = rospy.get_param("~groundingdino_config_path", None)
+        self.groundingdino_checkpoint_path = rospy.get_param("~groundingdino_checkpoint_path", None)
+        self.groundingdino_box_threshold = rospy.get_param("~groundingdino_box_threshold", 0.3)
+        self.groundingdino_text_threshold = rospy.get_param("~groundingdino_text_threshold", 0.25)
+        self.groundingdino_token_spans = rospy.get_param("~groundingdino_token_spans", None)
+        self.groundingdino_cpu_only = rospy.get_param("~groundingdino_cpu_only", False)
+        self.graspnet_checkpoint_path = rospy.get_param("~graspnet_checkpoint_path", None)
+        self.grapnet_refine_approach_dist = rospy.get_param("~grapnet_refine_approach_dist", 0.01)
+        self.graspnet_dist_thresh = rospy.get_param("~graspnet_dist_thresh", 0.05)
+        self.graspnet_angle_thresh = rospy.get_param("~graspnet_angle_thresh", 15)
+        self.graspnet_mask_thresh = rospy.get_param("~graspnet_mask_thresh", 0.5)
         os.makedirs(self.output_dir, exist_ok=True)
         self.identifier = 0
 
         # Check if GPU is available
-        self.use_gpu = torch.cuda.is_available() and not self.cpu_only
+        self.use_gpu = torch.cuda.is_available() and not self.groundingdino_cpu_only
         if self.use_gpu:
             device_count = torch.cuda.device_count()
             self.device = torch.device('cuda:0')
@@ -65,7 +71,7 @@ class OVGNetNode:
             rospy.loginfo("Using CPU for inference")
 
         # Create processing queue and worker thread
-        self.processing_queue = queue.Queue(maxsize=5)  # Limit queue size to prevent memory buildup
+        self.processing_queue = queue.Queue(maxsize=10)  # Limit queue size to prevent memory buildup
         self.worker_thread = threading.Thread(target=self.processing_worker)
         self.worker_thread.daemon = True  # Thread will exit when main program exits
         self.worker_thread.start()
@@ -142,12 +148,12 @@ class OVGNetNode:
             return
             
         # Skip processing if required paths are missing
-        if self.config_path is None or self.checkpoint_path is None or self.output_dir is None:
+        if self.groundingdino_config_path is None or self.groundingdino_checkpoint_path is None or self.output_dir is None or self.graspnet_checkpoint_path is None:
             rospy.logerr("Cannot find required path ...")
             return
             
         # Skip processing if text prompt is missing
-        if self.text_prompt is None:
+        if self.groundingdino_text_prompt is None:
             rospy.logerr("Text prompt need to be specified ...")
             return
         
@@ -230,15 +236,15 @@ class OVGNetNode:
             rospy.loginfo(f"Frame {identifier}: Got input from Intel Realsense D455")
             
             box_filter, pred_label = get_groundingdino_inference(
-                config_path=self.config_path,
-                checkpoint_path=self.checkpoint_path,
-                text_prompt=self.text_prompt,
-                box_threshold=self.box_threshold,
-                text_threshold=self.text_threshold,
+                config_path=self.groundingdino_config_path,
+                checkpoint_path=self.groundingdino_checkpoint_path,
+                text_prompt=self.groundingdino_text_prompt,
+                box_threshold=self.groundingdino_box_threshold,
+                text_threshold=self.groundingdino_text_threshold,
                 output_dir=os.path.join(self.output_dir, str(identifier)),
                 color_image=color_image_np,
-                token_spans=self.token_spans,
-                cpu_only=self.cpu_only
+                token_spans=self.groundingdino_token_spans,
+                cpu_only=self.groundingdino_cpu_only
             )
 
             # # If using GPU, ensure the data is on the correct device
@@ -272,6 +278,19 @@ class OVGNetNode:
             #     )
                 
             rospy.loginfo(f"Frame {identifier}: Completed groundingdino inference")
+
+            get_graspnet_inference(
+                checkpoint_path=self.graspnet_checkpoint_path,
+                refine_approach_dist=self.grapnet_refine_approach_dist,
+                dist_thresh=self.graspnet_dist_thresh,
+                angle_thresh=self.graspnet_angle_thresh,
+                mask_thresh=self.graspnet_mask_thresh,
+                color_image=color_image_np,
+                depth_image=depth_image_np,
+                camera_info=camera_info,
+                box_filter=box_filter[0]    # Pass the first index of the box filter since it only accept Tensor(0,4) not Tensor(1,4)
+            )
+            rospy.loginfo(f"Frame {identifier}: Completed graspnet inference")
 
             # Clear CUDA cache periodically to avoid memory issues
             if self.use_gpu and identifier % 10 == 0:
