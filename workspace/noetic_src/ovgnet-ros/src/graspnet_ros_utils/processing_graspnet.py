@@ -12,6 +12,7 @@ from scipy.spatial.transform import Rotation as R
 # from constants import WORKSPACE_LIMITS
 from scipy.spatial.distance import cdist
 import random
+import rospy
 
 reconstruction_config = {
     'nb_neighbors': 50,
@@ -80,7 +81,6 @@ def get_pointcloud(depth, intrinsics):
     Returns:
         points: HxWx3 float array of 3D points in camera coordinates.
     """
-    color_xy = np.asarray([[0.5440, 0.5604], [0.0586, 0.0975]])
     height, width = depth.shape
     xlin = np.linspace(0, width - 1, width)
     ylin = np.linspace(0, height - 1, height)
@@ -225,6 +225,52 @@ def process_pcds(pcds, reconstruction_config):
         pcd.estimate_normals()
     return trans, pcd
 
+def process_single_pcd(pcd, reconstruction_config):
+    # Step 1: Apply statistical outlier removal to filter noise
+    voxel_size = reconstruction_config['voxel_size']
+    pcd, _ = pcd.remove_statistical_outlier(
+        nb_neighbors=reconstruction_config['nb_neighbors'],
+        std_ratio=reconstruction_config['std_ratio']
+    )
+    rospy.loginfo("HIT")
+
+    # Step 2: Estimate normals
+    pcd.estimate_normals()
+    rospy.loginfo("HIT 2")
+
+    # Step 3: Apply voxel downsampling
+    pcd = pcd.voxel_down_sample(voxel_size)
+    rospy.loginfo("HIT 3")
+
+    # Step 4: Perform ICP registration (even if it's the same point cloud)
+    transok_flag = False
+    for _ in range(reconstruction_config['icp_max_try']):
+        reg_p2p = o3d.pipelines.registration.registration_icp(
+            pcd,
+            pcd,  # Register the point cloud with itself
+            reconstruction_config['max_correspondence_distance'],
+            np.eye(4, dtype=np.float32),
+            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+            o3d.pipelines.registration.ICPConvergenceCriteria(reconstruction_config['icp_max_iter'])
+        )
+        
+        # If the registration is successful based on the thresholds
+        if (np.trace(reg_p2p.transformation) > reconstruction_config['translation_thresh']) and \
+           (np.linalg.norm(reg_p2p.transformation[:3, 3]) < reconstruction_config['rotation_thresh']):
+            transok_flag = True
+            break
+    rospy.loginfo("HIT 4")
+
+    # If no good transformation found, reset to identity matrix
+    if not transok_flag:
+        reg_p2p.transformation = np.eye(4, dtype=np.float32)
+
+    # Step 5: Apply the transformation (even if it's the identity matrix)
+    pcd = pcd.transform(reg_p2p.transformation)
+    rospy.loginfo("HIT 5")
+
+    # Return the transformation matrix and the processed point cloud
+    return reg_p2p.transformation, pcd
 
 def get_fuse_pointcloud(env, box, color1, depth1):
     # box[:2] -= box[2:] / 2
@@ -256,9 +302,6 @@ def get_fuse_pointcloud(env, box, color1, depth1):
         points = transform_pointcloud(xyz, transform)
 
         # Filter out 3D points that are outside of the predefined bounds.
-        # ix = (points[Ellipsis, 0] >= env.bounds[0, 0]) & (points[Ellipsis, 0] < env.bounds[0, 1])
-        # iy = (points[Ellipsis, 1] >= env.bounds[1, 0]) & (points[Ellipsis, 1] < env.bounds[1, 1])
-        # iz = (points[Ellipsis, 2] >= env.bounds[2, 0]) & (points[Ellipsis, 2] < env.bounds[2, 1])
         ix = (points[Ellipsis, 0] >= bounds[0, 0]) & (points[Ellipsis, 0] < bounds[0, 1])
         iy = (points[Ellipsis, 1] >= bounds[1, 0]) & (points[Ellipsis, 1] < bounds[1, 1])
         iz = (points[Ellipsis, 2] >= bounds[2, 0]) & (points[Ellipsis, 2] < bounds[2, 1])
@@ -299,51 +342,60 @@ def get_fuse_pointcloud(env, box, color1, depth1):
     return fuse_pcd
 
 def get_single_fuse_pointcloud(camera_info, box_filter, color_image_np, depth_image_np):
-    # Convert box coordinates to 3D workspace bounds
-    box_filter[:2] -= box_filter[2:] / 2
-    box_filter[2:] += box_filter[:2]
-    a = box_filter.numpy()
-    xtop = [(a[0] * 0.448), (a[1] * 0.448)]
-    xdown = [(a[2] * 0.448), (a[3] * 0.448)]
-    bounds = np.asarray([[xtop[1] + 0.276, xdown[1] + 0.276], 
-                         [xtop[0] - 0.224, xdown[0] - 0.224], 
-                         [-0.0001, 0.4]])
-    
-    # Convert depth to point cloud
-    xyz = get_pointcloud(depth_image_np, camera_info["intrinsic_matrix"])
-    
-    # Transform points from camera to world coordinates
-    position = np.array(camera_info["position"]).reshape(3, 1)
-    rotation = p.getMatrixFromQuaternion(camera_info["rotation"])
-    rotation = np.array(rotation).reshape(3, 3)
-    transform = np.eye(4)
-    transform[:3, :] = np.hstack((rotation, position))
-    points = transform_pointcloud(xyz, transform)
-    
-    # Filter points within bounds
-    ix = (points[Ellipsis, 0] >= bounds[0, 0]) & (points[Ellipsis, 0] < bounds[0, 1])
-    iy = (points[Ellipsis, 1] >= bounds[1, 0]) & (points[Ellipsis, 1] < bounds[1, 1])
-    iz = (points[Ellipsis, 2] >= bounds[2, 0]) & (points[Ellipsis, 2] < bounds[2, 1])
-    valid = ix & iy & iz
-    points = points[valid]
-    colors = color_image_np[valid]
-    
-    # Create Open3D point cloud
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-    pcd.colors = o3d.utility.Vector3dVector(colors / 255.0)
-    
-    # Clean the point cloud
-    pcd.estimate_normals()
-    pcd, _ = pcd.remove_statistical_outlier(
-        nb_neighbors=reconstruction_config['nb_neighbors'],
-        std_ratio=reconstruction_config['std_ratio']
-    )
-    
-    # Optional voxel downsampling for performance
-    pcd = pcd.voxel_down_sample(reconstruction_config['voxel_size'])
-    
-    return pcd
+    try:
+        # Convert box coordinates to 3D workspace bounds
+        box_filter[:2] -= box_filter[2:] / 2
+        box_filter[2:] += box_filter[:2]
+        a = box_filter.numpy()
+        xtop = [(a[0] * 0.448), (a[1] * 0.448)]  # Adjusted scaling factor
+        xdown = [(a[2] * 0.448), (a[3] * 0.448)]  # Adjusted scaling factor
+        # # Extract bounding box (xmin, xmax, ymin, ymax)
+        # xmin, xmax, ymin, ymax = box_filter
+        # # Convert bounding box to world coordinates (after scaling by 0.448)
+        # xtop = [xmin * 0.448, xmax * 0.448]
+        # xdown = [ymin * 0.448, ymax * 0.448]
+        bounds = np.asarray([[xtop[1] + 0.276, xdown[1] + 0.276],  # Adjust bounds
+                            [xtop[0] - 0.224, xdown[0] - 0.224], 
+                            [0.2, 10.0]])  # Adjust Z bounds for depth range
+        # Convert depth to point cloud
+        xyz = get_pointcloud(depth_image_np, camera_info["intrinsic_matrix"])
+        
+        # Transform points from camera to world coordinates
+        position = np.array(camera_info["position"]).reshape(3, 1)
+        rotation = p.getMatrixFromQuaternion(camera_info["orientation"])
+        rotation = np.array(rotation).reshape(3, 3)
+        transform = np.eye(4)
+        transform[:3, :] = np.hstack((rotation, position))
+        points = transform_pointcloud(xyz, transform)
+        
+        # Filter points within bounds
+        ix = (points[Ellipsis, 0] >= bounds[0, 0]) & (points[Ellipsis, 0] < bounds[0, 1])
+        iy = (points[Ellipsis, 1] >= bounds[1, 0]) & (points[Ellipsis, 1] < bounds[1, 1])
+        iz = (points[Ellipsis, 2] >= bounds[2, 0]) & (points[Ellipsis, 2] < bounds[2, 1])
+        valid = ix & iy & iz
+        points = points[valid]
+        colors = color_image_np[valid]
+
+        # Sort 3D points by z-value, which works with array assignment to simulate
+        # z-buffering for rendering the heightmap image.
+        iz = np.argsort(points[:, -1])
+        points, colors = points[iz], colors[iz]
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points)
+        pcd.colors = o3d.utility.Vector3dVector(colors / 255.0)
+        pcd.voxel_down_sample(reconstruction_config['voxel_size'])
+        # # visualization
+        # frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
+        # o3d.visualization.draw_geometries([pcd, frame])
+        # the first pcd is the one for start fusion
+        
+        _, fuse_pcd = process_pcds(pcd, reconstruction_config)
+        rospy.loginfo(f"HIT 3")
+        
+        return fuse_pcd
+    except Exception as e:
+        raise RuntimeError(f"Failed to create single fuse cloudpoint: {e}")
 
 # def get_true_bboxs(env, color_image, depth_image, mask_image, workspace_limits, pixel_size):
 #     # get mask of all objects
