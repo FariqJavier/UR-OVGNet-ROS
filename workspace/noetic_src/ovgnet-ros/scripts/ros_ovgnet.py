@@ -28,6 +28,17 @@ from ovgnet_ros_utils.processing_ovgnet import (
     get_graspnet_inference
 )
 
+class RealsenseData:
+    def __init__(self):
+        self.color_image_np = None
+        self.depth_image_np = None
+        self.camera_info = None
+
+class GroundingDinoData:
+    def __init__(self):
+        self.box_filter = None
+        self.pred_label = None
+
 class OVGNetNode:
     def __init__(self):
         rospy.init_node('ros_graspnet_node')
@@ -59,6 +70,10 @@ class OVGNetNode:
         self.graspnet_mask_thresh = rospy.get_param("~graspnet_mask_thresh", 0.5)
         os.makedirs(self.output_dir, exist_ok=True)
         self.identifier = 0
+        self.full_realsense_input = {}
+        self.full_groundingdino_output = {}
+        self.processing_complete = False  # Flag to indicate when all processing is done
+        self.first_successful_frame = None  # To track the first frame with successful GroundingDINO
 
         # Check if GPU is available
         self.use_gpu = torch.cuda.is_available() and not self.groundingdino_cpu_only
@@ -188,7 +203,12 @@ class OVGNetNode:
             
         elif msg.data == False:
             self.identifier = 0
-            rospy.loginfo("Processing image finished")
+            # rospy.loginfo("Processing image finished")
+            self.processing_complete = True
+            rospy.loginfo("All frames captured, waiting for processing to complete")
+            # Start a new thread to wait for processing and run GraspNet
+            threading.Thread(target=self.wait_and_run_graspnet).start()
+
             return
 
     def processing_worker(self):
@@ -214,7 +234,7 @@ class OVGNetNode:
                 rospy.logerr(f"Error in worker thread: {e}")
 
     def process_frame(self, identifier, color_msg, depth_msg, camera_info_msg):
-        """Process a single frame with all the detection logic"""
+        """Process a single frame and do object detection using groundingdino"""
         try:
             rospy.loginfo(f"Processing frame {identifier}")
             
@@ -233,6 +253,11 @@ class OVGNetNode:
                 enable_camera_info=self.enable_camera_info,
                 use_mask=self.use_mask
             )
+            input_data = RealsenseData()
+            input_data.color_image_np = color_image_np
+            input_data.depth_image_np = depth_image_np
+            input_data.camera_info = camera_info
+            self.full_realsense_input[identifier] = input_data
             rospy.loginfo(f"Frame {identifier}: Got input from Intel Realsense D455")
             
             box_filter, pred_label = get_groundingdino_inference(
@@ -246,6 +271,19 @@ class OVGNetNode:
                 token_spans=self.groundingdino_token_spans,
                 cpu_only=self.groundingdino_cpu_only
             )
+            if box_filter is not None:
+                groundingdino_output = GroundingDinoData()
+                groundingdino_output.box_filter = box_filter
+                groundingdino_output.pred_label = pred_label
+                self.full_groundingdino_output[identifier] = groundingdino_output
+                rospy.loginfo(f"Frame {identifier}: Completed GroundingDINO inference successfully")
+                
+                # Track the first successful frame if we haven't found one yet
+                if self.first_successful_frame is None:
+                    self.first_successful_frame = identifier
+                    rospy.loginfo(f"Frame {identifier}: Marked as first successful GroundingDINO inference")
+            else:
+                rospy.loginfo(f"Frame {identifier}: Failed GroundingDINO inference")
 
             # # If using GPU, ensure the data is on the correct device
             # if self.use_gpu:
@@ -276,21 +314,19 @@ class OVGNetNode:
             #         token_spans=self.token_spans,
             #         cpu_only=self.cpu_only
             #     )
-                
-            rospy.loginfo(f"Frame {identifier}: Completed groundingdino inference")
 
-            get_graspnet_inference(
-                checkpoint_path=self.graspnet_checkpoint_path,
-                refine_approach_dist=self.grapnet_refine_approach_dist,
-                dist_thresh=self.graspnet_dist_thresh,
-                angle_thresh=self.graspnet_angle_thresh,
-                mask_thresh=self.graspnet_mask_thresh,
-                color_image=color_image_np,
-                depth_image=depth_image_np,
-                camera_info=camera_info,
-                box_filter=box_filter[0]    # Pass the first index of the box filter since it only accept Tensor(0,4) not Tensor(1,4)
-            )
-            rospy.loginfo(f"Frame {identifier}: Completed graspnet inference")
+            # get_graspnet_inference(
+            #     checkpoint_path=self.graspnet_checkpoint_path,
+            #     refine_approach_dist=self.grapnet_refine_approach_dist,
+            #     dist_thresh=self.graspnet_dist_thresh,
+            #     angle_thresh=self.graspnet_angle_thresh,
+            #     mask_thresh=self.graspnet_mask_thresh,
+            #     color_image=color_image_np,
+            #     depth_image=depth_image_np,
+            #     camera_info=camera_info,
+            #     box_filter=box_filter[0]    # Pass the first index of the box filter since it only accept Tensor(0,4) not Tensor(1,4)
+            # )
+            # rospy.loginfo(f"Frame {identifier}: Completed graspnet inference")
 
             # Clear CUDA cache periodically to avoid memory issues
             if self.use_gpu and identifier % 10 == 0:
@@ -301,6 +337,48 @@ class OVGNetNode:
             if self.use_gpu:
                 torch.cuda.empty_cache()  # Try to clear GPU memory on error
 
+    def wait_and_run_graspnet(self):
+        """Wait for all processing to complete, then run GraspNet on the first successful frame"""
+        # Wait for the processing queue to be empty
+        while not self.processing_queue.empty():
+            rospy.loginfo("Waiting for all frames to be processed...")
+            time.sleep(1.0)
+        
+        # Check if we have a successful frame
+        if self.first_successful_frame is None:
+            rospy.logerr("No successful GroundingDINO inference found, cannot run GraspNet")
+            return
+        
+        # Get the data for the first successful frame
+        frame_id = self.first_successful_frame
+        input_data = self.full_realsense_input[frame_id]
+        groundingdino_data = self.full_groundingdino_output[frame_id]
+        
+        rospy.loginfo(f"All processing complete. Running GraspNet on frame {frame_id}")
+        
+        # Run GraspNet on the first successful frame
+        try:
+            grasp_poses, scores, approach_vectors = get_graspnet_inference(
+                checkpoint_path=self.graspnet_checkpoint_path,
+                refine_approach_dist=self.grapnet_refine_approach_dist,
+                dist_thresh=self.graspnet_dist_thresh,
+                angle_thresh=self.graspnet_angle_thresh,
+                mask_thresh=self.graspnet_mask_thresh,
+                color_image=input_data.color_image_np,
+                depth_image=input_data.depth_image_np,
+                camera_info=input_data.camera_info,
+                box_filter=groundingdino_data.box_filter[0]
+            )
+            
+            rospy.loginfo(f"Completed GraspNet inference on frame {frame_id}")
+            
+            # Further processing of grasp results can be done here
+            # For example, publishing the grasp pose to a motion planning node
+            
+        except Exception as e:
+            rospy.logerr(f"Failed GraspNet inference on frame {frame_id}: {e}")
+            if self.use_gpu:
+                torch.cuda.empty_cache()
 
 if __name__ == '__main__':
     try:
