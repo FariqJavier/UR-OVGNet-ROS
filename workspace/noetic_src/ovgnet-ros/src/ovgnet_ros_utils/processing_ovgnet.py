@@ -114,10 +114,13 @@ def get_groundingdino_inference (
         # visualize raw image
         image_pil.save(os.path.join(output_dir, "input_groundingdino.png"))
             
+        # Return None, None if the failed to get groundingdino inference    
         box_filter, pred_label = get_grounding_output(
             model=model, image=image_tensor, caption=text_prompt,
             box_threshold=box_threshold, text_threshold=text_threshold, with_logits=True, cpu_only=cpu_only, token_spans=token_spans
         )
+        if box_filter is None:
+            return None, None
 
         # Draw results
         size = image_pil.size

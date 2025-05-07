@@ -30,6 +30,8 @@ def create_and_publish_mask(
         np.ndarray workspace mask
     """
     try:
+        os.makedirs(output_dir, exist_ok=True)
+
         # Create empty mask
         mask = np.zeros((height, width), dtype=np.uint8)
         
@@ -365,8 +367,8 @@ def get_color_and_depth_image (
         masked_color_image[workspace_mask] = raw_color_image[workspace_mask]
 
         # Apply mask to original depth image for visualization
-        masked_depth_image = np.zeros_like(raw_depth_image)
-        masked_depth_image[workspace_mask] = raw_depth_image[workspace_mask]
+        masked_depth_image = np.zeros_like(depth_np)
+        masked_depth_image[workspace_mask] = depth_np[workspace_mask]
 
         # Save masked image
         cv2.imwrite(os.path.join(output_dir, f'masked_color_{identifier}.png'), cv2.cvtColor(masked_color_image, cv2.COLOR_RGB2BGR))
@@ -376,7 +378,7 @@ def get_color_and_depth_image (
         rospy.loginfo(f"Saved images and metadata to {output_dir}")
 
         color_image = (masked_color_image if use_mask else raw_color_image) if enable_color else None
-        depth_image = (masked_depth_image if use_mask else raw_depth_image) if enable_depth else None
+        depth_image = (masked_depth_image if use_mask else depth_np) if enable_depth else None
         camera_info = meta if enable_camera_info else None
 
         return color_image, depth_image, camera_info        
