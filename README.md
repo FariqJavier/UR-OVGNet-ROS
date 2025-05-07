@@ -123,4 +123,7 @@ REMOVE UNNECESSARY FOLDER (need to search any files with keyword "/home/lm" or "
 
 PROBLEM:
 
-Dependency conflict especially using compatibility of CUDA and Torch on the project
+(Jika GroundingDino sulit menghasilkan inference:)
+Grounding Dino punya AP (Average Precision) untuk dataset COCO sebesar 52,5% dan untuk dataset ODinW sebesar 26,1%, dimana dataset coco lebih terstruktur dengan kategori yang sudah ditentukan sedangkan odinw lebih menantang karena dataset yang dibuat untuk open-set objek detection yang belum pernal dikenal sebelumnya.
+karena itu kemungkinan besar deteksi objek tidak akan berhasil jika hanya sati kali input
+Solusinya akan diambil input setiap 0,1 detik selama 1 detik (10 x input) sehingga setidaknya deteksi objek bisa menghasilkan hasil deteksinya 
