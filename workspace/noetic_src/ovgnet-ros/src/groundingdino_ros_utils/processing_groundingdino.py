@@ -84,7 +84,8 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
                 pred_phrases.append(pred_phrase)
         
         if len(pred_phrases) == 0:
-            raise ValueError("No boxes found.")
+            # raise ValueError("No boxes found.")
+            return None, None
 
         # return only object with max logit
         if with_logits: 
