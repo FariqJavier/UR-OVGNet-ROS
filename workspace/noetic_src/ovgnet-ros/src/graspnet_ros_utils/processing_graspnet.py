@@ -247,361 +247,84 @@ def process_pcds(pcds, reconstruction_config):
         pcd.estimate_normals()
     return trans, pcd
 
-def process_single_pcd(pcd, reconstruction_config):
-    # Step 1: Apply statistical outlier removal to filter noise
-    voxel_size = reconstruction_config['voxel_size']
-    pcd, _ = pcd.remove_statistical_outlier(
-        nb_neighbors=reconstruction_config['nb_neighbors'],
-        std_ratio=reconstruction_config['std_ratio']
-    )
+# def process_single_pcd(pcd, reconstruction_config):
+#     # Step 1: Apply statistical outlier removal to filter noise
+#     voxel_size = reconstruction_config['voxel_size']
+#     pcd, _ = pcd.remove_statistical_outlier(
+#         nb_neighbors=reconstruction_config['nb_neighbors'],
+#         std_ratio=reconstruction_config['std_ratio']
+#     )
 
-    # Step 2: Estimate normals
-    pcd.estimate_normals()
+#     # Step 2: Estimate normals
+#     pcd.estimate_normals()
 
-    # Step 3: Apply voxel downsampling
-    pcd = pcd.voxel_down_sample(voxel_size)
+#     # Step 3: Apply voxel downsampling
+#     pcd = pcd.voxel_down_sample(voxel_size)
 
-    # Step 4: Perform ICP registration (even if it's the same point cloud)
-    transok_flag = False
-    for _ in range(reconstruction_config['icp_max_try']):
-        reg_p2p = o3d.pipelines.registration.registration_icp(
-            pcd,
-            pcd,  # Register the point cloud with itself
-            reconstruction_config['max_correspondence_distance'],
-            np.eye(4, dtype=np.float32),
-            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-            o3d.pipelines.registration.ICPConvergenceCriteria(reconstruction_config['icp_max_iter'])
-        )
+#     # Step 4: Perform ICP registration (even if it's the same point cloud)
+#     transok_flag = False
+#     for _ in range(reconstruction_config['icp_max_try']):
+#         reg_p2p = o3d.pipelines.registration.registration_icp(
+#             pcd,
+#             pcd,  # Register the point cloud with itself
+#             reconstruction_config['max_correspondence_distance'],
+#             np.eye(4, dtype=np.float32),
+#             o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+#             o3d.pipelines.registration.ICPConvergenceCriteria(reconstruction_config['icp_max_iter'])
+#         )
         
-        # If the registration is successful based on the thresholds
-        if (np.trace(reg_p2p.transformation) > reconstruction_config['translation_thresh']) and \
-           (np.linalg.norm(reg_p2p.transformation[:3, 3]) < reconstruction_config['rotation_thresh']):
-            transok_flag = True
-            break
+#         # If the registration is successful based on the thresholds
+#         if (np.trace(reg_p2p.transformation) > reconstruction_config['translation_thresh']) and \
+#            (np.linalg.norm(reg_p2p.transformation[:3, 3]) < reconstruction_config['rotation_thresh']):
+#             transok_flag = True
+#             break
 
-    # If no good transformation found, reset to identity matrix
-    if not transok_flag:
-        reg_p2p.transformation = np.eye(4, dtype=np.float32)
+#     # If no good transformation found, reset to identity matrix
+#     if not transok_flag:
+#         reg_p2p.transformation = np.eye(4, dtype=np.float32)
 
-    # Step 5: Apply the transformation (even if it's the identity matrix)
-    pcd = pcd.transform(reg_p2p.transformation)
+#     # Step 5: Apply the transformation (even if it's the identity matrix)
+#     pcd = pcd.transform(reg_p2p.transformation)
 
-    # Return the transformation matrix and the processed point cloud
-    return reg_p2p.transformation, pcd
+#     # Return the transformation matrix and the processed point cloud
+#     return reg_p2p.transformation, pcd
 
-def get_fuse_pointcloud(env, box, color1, depth1):
-    # box[:2] -= box[2:] / 2
-    # box[2:] += box[:2]
-    # a = box.numpy()
-    # xtop = [a[0]*0.448-0.224, a[1]*0.448+0.276]
-    # xdown = [a[2]*0.448-0.224, a[3]*0.448+0.276]
-    # bounds = np.asarray([[xtop[1], xdown[1]], [xtop[0], xdown[0]], [-0.0001, 0.4]])
-    box[:2] -= box[2:] / 2
-    box[2:] += box[:2]
-    a = box.numpy()
-    xtop = [(a[0] * 0.448), (a[1] * 0.448)]
-    xdown = [(a[2] * 0.448), (a[3] * 0.448)]
-    # xtop = points[xtop[0], xtop[1]][:2]
-    # xdown = points[xdown[0], xdown[1]][:2]
-    bounds = np.asarray([[xtop[1] + 0.276, xdown[1] + 0.276], [xtop[0] - 0.224, xdown[0] - 0.224], [-0.0001, 0.4]])
-    # bounds = np.asarray([[xtop[1] + 0.25, xdown[1] + 0.302], [xtop[0] - 0.250, xdown[0] - 0.198], [-0.0001, 0.4]])
-    pcds = []
-    configs = [env.oracle_cams[0], env.agent_cams[0], env.agent_cams[1], env.agent_cams[2]]
-    # Capture near-orthographic RGB-D images and segmentation masks.
-    for config in configs:
-        color, depth, _ = env.render_camera(config)
-        xyz = get_pointcloud(depth, config["intrinsics"])
-        position = np.array(config["position"]).reshape(3, 1)
-        rotation = p.getMatrixFromQuaternion(config["rotation"])
-        rotation = np.array(rotation).reshape(3, 3)
-        transform = np.eye(4)
-        transform[:3, :] = np.hstack((rotation, position))
-        points = transform_pointcloud(xyz, transform)
-
-        # Filter out 3D points that are outside of the predefined bounds.
-        ix = (points[Ellipsis, 0] >= bounds[0, 0]) & (points[Ellipsis, 0] < bounds[0, 1])
-        iy = (points[Ellipsis, 1] >= bounds[1, 0]) & (points[Ellipsis, 1] < bounds[1, 1])
-        iz = (points[Ellipsis, 2] >= bounds[2, 0]) & (points[Ellipsis, 2] < bounds[2, 1])
-        valid = ix & iy & iz
-        points = points[valid]
-        colors = color[valid]
-        # Sort 3D points by z-value, which works with array assignment to simulate
-        # z-buffering for rendering the heightmap image.
-        iz = np.argsort(points[:, -1])
-        points, colors = points[iz], colors[iz]
-
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
-        pcd.colors = o3d.utility.Vector3dVector(colors / 255.0)
-        pcd.voxel_down_sample(reconstruction_config['voxel_size'])
-        # # visualization
-        # frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
-        # o3d.visualization.draw_geometries([pcd, frame])
-        # the first pcd is the one for start fusion
-        pcds.append(pcd)
-
-    _, fuse_pcd = process_pcds(pcds, reconstruction_config)
-    # a = np.asarray(fuse_pcd.points)  # A已经变成n*3的矩阵
-    # ox = (a[Ellipsis, 0] >= bounds[0, 0]) & (a[Ellipsis, 0] < bounds[0, 1])
-    # oy = (a[Ellipsis, 1] >= bounds[1, 0]) & (a[Ellipsis, 1] < bounds[1, 1])
-    # oz = (a[Ellipsis, 2] >= bounds[2, 0]) & (a[Ellipsis, 2] < bounds[2, 1])
-    # alid = ox & oy & oz
-    # a = a[alid]
-    # cd = o3d.geometry.PointCloud()  # 实例化一个pointcloud类
-    # cd.points = o3d.utility.Vector3dVector(a)  # 给该类传入坐标数据，此时pcd.points已经是一个点云了
-    # o3d.visualization.draw_geometries([cd])  # 显示一下
-
-    # visualization
-    # frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
-    # o3d.visualization.draw_geometries([fuse_pcd, frame])
-
-
-    return fuse_pcd
-
-
-#######################################################################################################################
-#   RENCANA:
-#   Karena implementasi official ovgnet yang menggunakan 4 kamera dapat direplikasi dengan penggunaan 1 kamera tapi mengambil input dari banyak sudut
-#   Setiap input dari sudut tertentu bisa diibaratkan menjadi satu input kamera terpisah sehingga penggabungan pcd dengan metode icp di function process_pcds dapat dilakukan
-#   Jadi dengan menggabungkan pcd dari berbagai input sudut dapat dimerge jadi 1 pcd utuh yang lengkap menggunakan icp
-#   Namun jika groundingdino hanya mampu mengenali 1 dari semua sudut maka icp dilakukan dengan input sudut itu sendiri
-#######################################################################################################################
-
-def get_single_fuse_pointcloud(camera_info, box_filter, color_image_np, depth_image_np):
-    try:
-        rospy.loginfo(f"Box Filter: {box_filter}")
-        rospy.loginfo(f'Depth Image Shape: {depth_image_np.shape}')
-        
-        # Check if depth image is valid
-        if np.all(depth_image_np == 0):
-            rospy.logwarn("Depth image contains all zeros - no valid depth data")
-            return None
-            
-        # Convert depth to point cloud
-        xyz = get_pointcloud(depth_image_np, camera_info["intrinsic_matrix"])
-        
-        # Reshape for easier handling
-        points_shape = xyz.shape
-        xyz_reshaped = xyz.reshape(-1, 3)
-        
-        # Transform points from camera to world coordinates
-        position = np.array(camera_info["position"]).reshape(3, 1)
-        rotation = p.getMatrixFromQuaternion(camera_info["orientation"])
-        rotation = np.array(rotation).reshape(3, 3)
-        transform = np.eye(4)
-        transform[:3, :3] = rotation
-        transform[:3, 3] = position.flatten()
-        
-        # Apply transformation
-        points_homogeneous = np.hstack((xyz_reshaped, np.ones((xyz_reshaped.shape[0], 1))))
-        transformed_points = (transform @ points_homogeneous.T).T[:, :3]
-        
-        # Log point cloud ranges for debugging
-        min_values = np.min(transformed_points, axis=0)
-        max_values = np.max(transformed_points, axis=0)
-        rospy.loginfo(f"Point cloud ranges: X: [{min_values[0]:.4f}, {max_values[0]:.4f}], "
-                     f"Y: [{min_values[1]:.4f}, {max_values[1]:.4f}], "
-                     f"Z: [{min_values[2]:.4f}, {max_values[2]:.4f}]")
-        
-        # OPTION 1: Use bounding box from tensor but adjusted to match point cloud coordinate system
-        box_filter_np = box_filter.numpy() if hasattr(box_filter, 'numpy') else np.array(box_filter)
-        
-        # Extract center and dimensions
-        x_center, y_center = box_filter_np[0], box_filter_np[1]
-        width, height = box_filter_np[2], box_filter_np[3]
-        
-        # OPTION 2: Calculate bounds directly from point cloud with margin
-        # Set to True to use this option
-        use_point_cloud_bounds = False
-        
-        if use_point_cloud_bounds:
-            # Create bounds based on actual point cloud with a margin
-            margin_x = (max_values[0] - min_values[0]) * 0.1  # 10% margin
-            margin_y = (max_values[1] - min_values[1]) * 0.1
-            margin_z = (max_values[2] - min_values[2]) * 0.1
-            
-            # Apply box filter proportionally to the point cloud range
-            # This narrows down the X and Y ranges based on the box filter's relative position
-            x_range = max_values[0] - min_values[0]
-            y_range = max_values[1] - min_values[1]
-            
-            # Calculate relative position of box in normalized coordinates
-            rel_xmin = (x_center - width/2)
-            rel_xmax = (x_center + width/2)
-            rel_ymin = (y_center - height/2)
-            rel_ymax = (y_center + height/2)
-            
-            # Map to point cloud range (adjust these mappings based on your coordinate system)
-            x_bounds = [
-                min_values[1] + rel_xmin * y_range,
-                min_values[1] + rel_xmax * y_range
-            ]
-            
-            y_bounds = [
-                min_values[0] + rel_ymin * x_range,
-                min_values[0] + rel_ymax * x_range
-            ]
-            
-            # Use a reasonable Z range from the point cloud
-            z_min = min_values[2] + margin_z
-            z_max = max_values[2] - margin_z
-            z_bounds = [z_min, z_max]
-            
-            # Make sure Z range is reasonable
-            if z_min > 0.6 or z_max < 0.2:
-                # Default back to 0.2-0.4 if outside expected range
-                z_bounds = [0.2, 0.4]
-        else:
-            # Use modified version of your original approach
-            scaling_factor = 0.1  # Reduced from 0.448 to account for coordinate differences
-            x_offset = -0.3  # Adjusted based on point cloud
-            y_offset = 0.1   # Adjusted based on point cloud
-            
-            # Calculate bounds (swapped to match your coordinate system)
-            x_bounds = [
-                min_values[1] + (x_center - width/2) * scaling_factor + x_offset,
-                max_values[1] + (x_center + width/2) * scaling_factor + x_offset
-            ]
-            
-            y_bounds = [
-                min_values[0] + (y_center - height/2) * scaling_factor + y_offset,
-                max_values[0] + (y_center + height/2) * scaling_factor + y_offset
-            ]
-            
-            z_bounds = [0.2, 0.6]  # Expanded Z range
-        
-        # Use X, Y from the point cloud approach and Z from fixed range
-        bounds = np.array([
-            x_bounds,  # X bounds
-            y_bounds,  # Y bounds
-            z_bounds   # Z bounds
-        ])
-        
-        rospy.loginfo(f"Adjusted Bounds: {bounds}")
-        
-        # Filter points within bounds
-        ix = (transformed_points[:, 1] >= bounds[0, 0]) & (transformed_points[:, 1] <= bounds[0, 1])
-        iy = (transformed_points[:, 0] >= bounds[1, 0]) & (transformed_points[:, 0] <= bounds[1, 1])
-        iz = (transformed_points[:, 2] >= bounds[2, 0]) & (transformed_points[:, 2] <= bounds[2, 1])
-        
-        # Log the number of points passing each filter
-        rospy.loginfo(f"Points in X range: {np.sum(ix)}/{len(ix)}")
-        rospy.loginfo(f"Points in Y range: {np.sum(iy)}/{len(iy)}")
-        rospy.loginfo(f"Points in Z range: {np.sum(iz)}/{len(iz)}")
-        
-        valid = ix & iy & iz
-        total_valid = np.sum(valid)
-        rospy.loginfo(f"Total valid points: {total_valid}/{len(valid)}")
-        
-        # Fallback if no points match all criteria
-        if total_valid < 10:
-            rospy.logwarn(f"Very few points ({total_valid}) match all criteria, trying expanded bounds")
-            # Expand bounds by 20%
-            x_width = bounds[0, 1] - bounds[0, 0]
-            y_width = bounds[1, 1] - bounds[1, 0]
-            z_width = bounds[2, 1] - bounds[2, 0]
-            
-            bounds[0, 0] -= x_width * 0.2
-            bounds[0, 1] += x_width * 0.2
-            bounds[1, 0] -= y_width * 0.2
-            bounds[1, 1] += y_width * 0.2
-            bounds[2, 0] -= z_width * 0.2
-            bounds[2, 1] += z_width * 0.2
-            
-            rospy.loginfo(f"Expanded bounds: {bounds}")
-            
-            # Re-filter with expanded bounds
-            ix = (transformed_points[:, 1] >= bounds[0, 0]) & (transformed_points[:, 1] <= bounds[0, 1])
-            iy = (transformed_points[:, 0] >= bounds[1, 0]) & (transformed_points[:, 0] <= bounds[1, 1])
-            iz = (transformed_points[:, 2] >= bounds[2, 0]) & (transformed_points[:, 2] <= bounds[2, 1])
-            
-            valid = ix & iy & iz
-            total_valid = np.sum(valid)
-            rospy.loginfo(f"Total valid points after expansion: {total_valid}/{len(valid)}")
-            
-            # If still not enough points, fall back to using just Z filter
-            if total_valid < 10:
-                rospy.logwarn("Still too few points, falling back to Z filter only")
-                valid = iz
-                total_valid = np.sum(valid)
-                rospy.loginfo(f"Total valid points with Z filter only: {total_valid}/{len(valid)}")
-        
-        if total_valid == 0:
-            rospy.logwarn("No points within bounds, returning empty point cloud")
-            return None
-            
-        filtered_points = transformed_points[valid]
-        
-        # Reshape color image to match point cloud dimensions
-        color_reshaped = color_image_np.reshape(-1, 3)
-        filtered_colors = color_reshaped[valid]
-        
-        # Sort 3D points by z-value for proper rendering
-        iz = np.argsort(filtered_points[:, 2])
-        sorted_points = filtered_points[iz]
-        sorted_colors = filtered_colors[iz]
-        
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(sorted_points)
-        pcd.colors = o3d.utility.Vector3dVector(sorted_colors / 255.0)
-        
-        # Apply voxel downsampling
-        if hasattr(pcd, 'voxel_down_sample') and reconstruction_config.get('voxel_size'):
-            pcd = pcd.voxel_down_sample(reconstruction_config['voxel_size'])
-        
-        # Process the point cloud for fusion
-        _ , fuse_pcd = process_single_pcd(pcd, reconstruction_config)
-        rospy.loginfo(f'Fuse_pcd: {fuse_pcd}')
-        
-        return fuse_pcd
-    except Exception as e:
-        rospy.logerr(f"Failed to create single fuse cloudpoint: {e}")
-        import traceback
-        rospy.logerr(traceback.format_exc())
-        return None
-
-# def get_single_fuse_pointcloud(camera_info, box_filter, color_image_np, depth_image_np):
-#     try:
-#         rospy.loginfo(f"Box Filter: {box_filter}")
-#         rospy.loginfo(f'Depth: {depth_image_np}')
-#         # Convert box coordinates to 3D workspace bounds
-#         box_filter[:2] -= box_filter[2:] / 2
-#         box_filter[2:] += box_filter[:2]
-#         a = box_filter.numpy()
-#         xtop = [(a[0] * 0.448), (a[1] * 0.448)]  # Adjusted scaling factor
-#         xdown = [(a[2] * 0.448), (a[3] * 0.448)]  # Adjusted scaling factor
-#         # # Extract bounding box (xmin, xmax, ymin, ymax)
-#         # xmin, xmax, ymin, ymax = box_filter
-#         # # Convert bounding box to world coordinates (after scaling by 0.448)
-#         # xtop = [xmin * 0.448, xmax * 0.448]
-#         # xdown = [ymin * 0.448, ymax * 0.448]
-#         bounds = np.asarray([[xtop[1] + 0.276, xdown[1] + 0.276],  # Adjust bounds
-#                             [xtop[0] - 0.224, xdown[0] - 0.224], 
-#                             [0.2, 0.4]])  # Adjust Z bounds for depth range
-#         rospy.loginfo(f"Bounds: {bounds}")
-#         # Convert depth to point cloud
-#         xyz = get_pointcloud(depth_image_np, camera_info["intrinsic_matrix"])
-        
-#         # Transform points from camera to world coordinates
-#         position = np.array(camera_info["position"]).reshape(3, 1)
-#         rotation = p.getMatrixFromQuaternion(camera_info["orientation"])
+# def get_fuse_pointcloud(env, box, color1, depth1):
+#     # box[:2] -= box[2:] / 2
+#     # box[2:] += box[:2]
+#     # a = box.numpy()
+#     # xtop = [a[0]*0.448-0.224, a[1]*0.448+0.276]
+#     # xdown = [a[2]*0.448-0.224, a[3]*0.448+0.276]
+#     # bounds = np.asarray([[xtop[1], xdown[1]], [xtop[0], xdown[0]], [-0.0001, 0.4]])
+#     box[:2] -= box[2:] / 2
+#     box[2:] += box[:2]
+#     a = box.numpy()
+#     xtop = [(a[0] * 0.448), (a[1] * 0.448)]
+#     xdown = [(a[2] * 0.448), (a[3] * 0.448)]
+#     # xtop = points[xtop[0], xtop[1]][:2]
+#     # xdown = points[xdown[0], xdown[1]][:2]
+#     bounds = np.asarray([[xtop[1] + 0.276, xdown[1] + 0.276], [xtop[0] - 0.224, xdown[0] - 0.224], [-0.0001, 0.4]])
+#     # bounds = np.asarray([[xtop[1] + 0.25, xdown[1] + 0.302], [xtop[0] - 0.250, xdown[0] - 0.198], [-0.0001, 0.4]])
+#     pcds = []
+#     configs = [env.oracle_cams[0], env.agent_cams[0], env.agent_cams[1], env.agent_cams[2]]
+#     # Capture near-orthographic RGB-D images and segmentation masks.
+#     for config in configs:
+#         color, depth, _ = env.render_camera(config)
+#         xyz = get_pointcloud(depth, config["intrinsics"])
+#         position = np.array(config["position"]).reshape(3, 1)
+#         rotation = p.getMatrixFromQuaternion(config["rotation"])
 #         rotation = np.array(rotation).reshape(3, 3)
 #         transform = np.eye(4)
 #         transform[:3, :] = np.hstack((rotation, position))
 #         points = transform_pointcloud(xyz, transform)
-#         rospy.loginfo(f"Pointcloud: {points}")
-        
-#         # Filter points within bounds
+
+#         # Filter out 3D points that are outside of the predefined bounds.
 #         ix = (points[Ellipsis, 0] >= bounds[0, 0]) & (points[Ellipsis, 0] < bounds[0, 1])
-#         rospy.loginfo(f"ix range: {ix.min()}, {ix.max()}")
 #         iy = (points[Ellipsis, 1] >= bounds[1, 0]) & (points[Ellipsis, 1] < bounds[1, 1])
-#         rospy.loginfo(f"iy range: {iy.min()}, {iy.max()}")
 #         iz = (points[Ellipsis, 2] >= bounds[2, 0]) & (points[Ellipsis, 2] < bounds[2, 1])
-#         rospy.loginfo(f"iz range: {iz.min()}, {iz.max()}")
 #         valid = ix & iy & iz
 #         points = points[valid]
-#         colors = color_image_np[valid]
-
+#         colors = color[valid]
 #         # Sort 3D points by z-value, which works with array assignment to simulate
 #         # z-buffering for rendering the heightmap image.
 #         iz = np.argsort(points[:, -1])
@@ -615,12 +338,167 @@ def get_single_fuse_pointcloud(camera_info, box_filter, color_image_np, depth_im
 #         # frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
 #         # o3d.visualization.draw_geometries([pcd, frame])
 #         # the first pcd is the one for start fusion
+#         pcds.append(pcd)
+
+#     _, fuse_pcd = process_pcds(pcds, reconstruction_config)
+#     # a = np.asarray(fuse_pcd.points)  # A已经变成n*3的矩阵
+#     # ox = (a[Ellipsis, 0] >= bounds[0, 0]) & (a[Ellipsis, 0] < bounds[0, 1])
+#     # oy = (a[Ellipsis, 1] >= bounds[1, 0]) & (a[Ellipsis, 1] < bounds[1, 1])
+#     # oz = (a[Ellipsis, 2] >= bounds[2, 0]) & (a[Ellipsis, 2] < bounds[2, 1])
+#     # alid = ox & oy & oz
+#     # a = a[alid]
+#     # cd = o3d.geometry.PointCloud()  # 实例化一个pointcloud类
+#     # cd.points = o3d.utility.Vector3dVector(a)  # 给该类传入坐标数据，此时pcd.points已经是一个点云了
+#     # o3d.visualization.draw_geometries([cd])  # 显示一下
+
+#     # visualization
+#     # frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
+#     # o3d.visualization.draw_geometries([fuse_pcd, frame])
+
+
+#     return fuse_pcd
+
+
+#######################################################################################################################
+#   RENCANA:
+#   Karena implementasi official ovgnet yang menggunakan 4 kamera dapat direplikasi dengan penggunaan 1 kamera tapi mengambil input dari banyak sudut
+#   Setiap input dari sudut tertentu bisa diibaratkan menjadi satu input kamera terpisah sehingga penggabungan pcd dengan metode icp di function process_pcds dapat dilakukan
+#   Jadi dengan menggabungkan pcd dari berbagai input sudut dapat dimerge jadi 1 pcd utuh yang lengkap menggunakan icp
+#   Namun jika groundingdino hanya mampu mengenali 1 dari semua sudut maka icp dilakukan dengan input sudut itu sendiri
+#######################################################################################################################
+
+def get_fuse_pointcloud(realsense_input_dict, box_filter):
+    """
+    Fuse the depth from all the angle to a single pointcloud
+    
+    Args:
+        realsense_input_dict: Hashmap of realsense input(color, depth, camera_info)
+        box_filter: Bounding box tensor [center_x, center_y, width, height] of object
+    Returns:
+        fuse_pcd
+    """
+    try:
+        rospy.loginfo(f"Box Filter: {box_filter}")
+
+        box_filter_np = box_filter.numpy() if hasattr(box_filter, 'numpy') else np.array(box_filter)
         
-#         fuse_pcd = process_single_pcd(pcd, reconstruction_config)
+        # Extract center and dimensions
+        x_center, y_center = box_filter_np[0], box_filter_np[1]
+        width, height = box_filter_np[2], box_filter_np[3]
+
+        scaling_factor = 0.1 
+        x_offset = -0.2 
+        y_offset = 0.1
+
+        pcds = []
+        for identifier, realsense_input in realsense_input_dict.items():
+            color_image_np = realsense_input.color_image_np
+            depth_image_np = realsense_input.depth_image_np
+            camera_info = realsense_input.camera_info
+
+            # Check if depth image is valid
+            if np.all(depth_image_np == 0):
+                rospy.logwarn("Depth image contains all zeros - no valid depth data")
+                return None
+            
+            # Convert depth to point cloud
+            xyz = get_pointcloud(depth_image_np, camera_info["intrinsic_matrix"])
+            
+            # Reshape for easier handling
+            points_shape = xyz.shape
+            xyz_reshaped = xyz.reshape(-1, 3)
         
-#         return fuse_pcd
-#     except Exception as e:
-#         raise RuntimeError(f"Failed to create single fuse cloudpoint: {e}")
+            # Transform points from camera to world coordinates
+            position = np.array(camera_info["position"]).reshape(3, 1)
+            rotation = p.getMatrixFromQuaternion(camera_info["orientation"])
+            rotation = np.array(rotation).reshape(3, 3)
+            transform = np.eye(4)
+            transform[:3, :3] = rotation
+            transform[:3, 3] = position.flatten()
+            # transform[:3, :] = np.hstack((rotation, position))
+        
+            # Apply transformation
+            # transformed_points = transform_pointcloud(xyz, transform)
+            points_homogeneous = np.hstack((xyz_reshaped, np.ones((xyz_reshaped.shape[0], 1))))
+            transformed_points = (transform @ points_homogeneous.T).T[:, :3]
+
+            # Log point cloud ranges for debugging
+            min_values = np.min(transformed_points, axis=0)
+            max_values = np.max(transformed_points, axis=0)
+            rospy.loginfo(f"Point cloud ranges: X: [{min_values[0]:.4f}, {max_values[0]:.4f}], "
+                        f"Y: [{min_values[1]:.4f}, {max_values[1]:.4f}], "
+                        f"Z: [{min_values[2]:.4f}, {max_values[2]:.4f}]")
+                
+            # Calculate bounds
+            x_bounds = [
+                min_values[1] + (x_center - width/2) * scaling_factor + x_offset,
+                max_values[1] + (x_center + width/2) * scaling_factor + x_offset
+            ]
+            y_bounds = [
+                min_values[0] + (y_center - height/2) * scaling_factor + y_offset,
+                max_values[0] + (y_center + height/2) * scaling_factor + y_offset
+            ]   
+            z_bounds = [0.2, 0.6]
+            bounds = np.array([
+                x_bounds,  # X bounds
+                y_bounds,  # Y bounds
+                z_bounds   # Z bounds
+            ])
+            rospy.loginfo(f"Adjusted Bounds: {bounds}")
+        
+            # Filter points within bounds
+            ix = (transformed_points[:, 1] >= bounds[0, 0]) & (transformed_points[:, 1] <= bounds[0, 1])
+            iy = (transformed_points[:, 0] >= bounds[1, 0]) & (transformed_points[:, 0] <= bounds[1, 1])
+            iz = (transformed_points[:, 2] >= bounds[2, 0]) & (transformed_points[:, 2] <= bounds[2, 1])
+            
+            # Log the number of points passing each filter
+            rospy.loginfo(f"Points in X range: {np.sum(ix)}/{len(ix)}")
+            rospy.loginfo(f"Points in Y range: {np.sum(iy)}/{len(iy)}")
+            rospy.loginfo(f"Points in Z range: {np.sum(iz)}/{len(iz)}")
+            
+            valid = ix & iy & iz
+            total_valid = np.sum(valid)
+            rospy.loginfo(f"Total valid points: {total_valid}/{len(valid)}")
+        
+            if total_valid == 0:
+                rospy.logwarn("No points within bounds, returning empty point cloud")
+                return None
+            if total_valid < 50:
+                rospy.logwarn(f"Very few points ({total_valid}) match all criteria, returning empty point cloud")
+                continue
+            
+            filtered_points = transformed_points[valid]
+            
+            # Reshape color image to match point cloud dimensions
+            color_reshaped = color_image_np.reshape(-1, 3)
+            filtered_colors = color_reshaped[valid]
+            
+            # Sort 3D points by z-value for proper rendering
+            iz = np.argsort(filtered_points[:, 2])
+            sorted_points = filtered_points[iz]
+            sorted_colors = filtered_colors[iz]
+            
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(sorted_points)
+            pcd.colors = o3d.utility.Vector3dVector(sorted_colors / 255.0)
+        
+            # Apply voxel downsampling
+            if hasattr(pcd, 'voxel_down_sample') and reconstruction_config.get('voxel_size'):
+                pcd = pcd.voxel_down_sample(reconstruction_config['voxel_size'])
+
+            # the first pcd is the one for start fusion
+            pcds.append(pcd)
+        
+        # Process the point cloud for fusion
+        _, fuse_pcd = process_pcds(pcds, reconstruction_config)
+        rospy.loginfo(f'Fuse_pcd: {fuse_pcd}')
+        
+        return fuse_pcd
+    except Exception as e:
+        rospy.logerr(f"Failed to create single fuse cloudpoint: {e}")
+        import traceback
+        rospy.logerr(traceback.format_exc())
+        return None
 
 # def get_true_bboxs(env, color_image, depth_image, mask_image, workspace_limits, pixel_size):
 #     # get mask of all objects
@@ -1028,17 +906,178 @@ def switch_one_grasp(boxes_filt, grasp_pose_set):
         g_index = indexs[g_index]
         return g_index
 
-def switch_one_grasp1(boxes_filt, grasp_pose_set, depth):
-    center = boxes_filt.numpy()[:2]
-    center[0] = (center[0]*0.448)+0.276
-    center[1] = (center[1]*0.448)-0.224
-    center = np.expand_dims(center, axis=0)
-    grasp_centers = []
-    for grasp_center in grasp_pose_set:
-        grasp_centers.append(grasp_center[:2])
-    distances = cdist(center, grasp_centers, metric='euclidean')
-    index = np.argmin(distances)
-    return index
+# def switch_one_grasp1(boxes_filt, grasp_pose_set, depth):
+#     center = boxes_filt.numpy()[:2]
+#     center[0] = (center[0]*0.448)+0.276
+#     center[1] = (center[1]*0.448)-0.224
+#     center = np.expand_dims(center, axis=0)
+#     grasp_centers = []
+#     for grasp_center in grasp_pose_set:
+#         grasp_centers.append(grasp_center[:2])
+#     distances = cdist(center, grasp_centers, metric='euclidean')
+#     index = np.argmin(distances)
+#     return index
+
+# def select_best_grasp(grasp_pose_set, target_point=None, box_filter=None, min_height=0.01):
+#     """
+#     Select the best grasp from a set of grasp poses.
+    
+#     Args:
+#         grasp_pose_set: List of grasp poses [x, y, z, qx, qy, qz, qw]
+#         target_point: Optional target point [x, y, z] to grasp near (if None, uses box_filter)
+#         box_filter: Optional bounding box tensor [center_x, center_y, width, height]
+#         min_height: Minimum height (z) for valid grasps
+        
+#     Returns:
+#         int: Index of the best grasp in grasp_pose_set
+#     """
+#     try:
+#         # Filter grasps by height (z-coordinate)
+#         valid_indices = []
+#         valid_centers = []
+        
+#         for i, grasp in enumerate(grasp_pose_set):
+#             # Check if the grasp is above the minimum height
+#             if grasp[2] >= min_height:
+#                 valid_indices.append(i)
+#                 valid_centers.append(grasp[:2])  # xy coordinates
+        
+#         rospy.loginfo(f"Found {len(valid_indices)} grasps above minimum height {min_height}")
+        
+#         # If no valid grasps, return the first grasp (or None if empty)
+#         if len(valid_indices) == 0:
+#             rospy.logwarn("No grasps above minimum height, returning first grasp")
+#             return 0 if len(grasp_pose_set) > 0 else None
+        
+#         # If only one valid grasp, return it
+#         if len(valid_indices) == 1:
+#             return valid_indices[0]
+        
+#         # Determine target point for distance calculation
+#         if target_point is not None:
+#             # Use provided target point
+#             center = np.array([target_point[0], target_point[1]])
+#         elif box_filter is not None:
+#             # Convert bounding box to world coordinates
+#             if hasattr(box_filter, 'numpy'):
+#                 box = box_filter.numpy()
+#             else:
+#                 box = np.array(box_filter)
+                
+#             # Get camera to world transformation parameters from ROS parameter server
+#             # or use default values similar to your original code
+#             try:
+#                 # Try to get transformation parameters from ROS parameter server
+#                 x_scale = rospy.get_param('~x_scale', 0.448)
+#                 x_offset = rospy.get_param('~x_offset', -0.224)
+#                 y_scale = rospy.get_param('~y_scale', 0.448)
+#                 y_offset = rospy.get_param('~y_offset', 0.276)
+#             except:
+#                 # Use default values
+#                 x_scale, x_offset = 0.448, -0.224
+#                 y_scale, y_offset = 0.448, 0.276
+            
+#             # Transform box center to world coordinates
+#             # Note: Swapping x and y to match your original code's coordinate transformation
+#             center = np.array([
+#                 box[1] * x_scale + x_offset,  # x coordinate
+#                 box[0] * y_scale + y_offset   # y coordinate
+#             ])
+            
+#             rospy.loginfo(f"Box center in image: [{box[0]:.3f}, {box[1]:.3f}]")
+#             rospy.loginfo(f"Box center in world: [{center[0]:.3f}, {center[1]:.3f}]")
+#         else:
+#             # If no target or box provided, use the mean position of all valid grasps
+#             center = np.mean(valid_centers, axis=0)
+#             rospy.loginfo(f"Using mean grasp position: [{center[0]:.3f}, {center[1]:.3f}]")
+        
+#         # Reshape center to 2D array for cdist
+#         center = center.reshape(1, 2)
+        
+#         # Calculate distances from center to each valid grasp
+#         distances = cdist(center, valid_centers, metric='euclidean')
+        
+#         # Find the closest grasp to the center
+#         closest_idx = np.argmin(distances)
+#         best_grasp_idx = valid_indices[closest_idx]
+        
+#         dist = distances[0, closest_idx]
+#         rospy.loginfo(f"Selected grasp {best_grasp_idx} at distance {dist:.3f}m from target")
+        
+#         return best_grasp_idx
+        
+#     except Exception as e:
+#         rospy.logerr(f"Error selecting best grasp: {e}")
+#         import traceback
+#         rospy.logerr(traceback.format_exc())
+#         # Return the first grasp if there's an error
+#         return 0 if len(grasp_pose_set) > 0 else None
+
+def select_best_grasp(grasp_pose_set, grasp_scores, target_point=None, box_filter=None, min_height=0.01):
+    """
+    Select the best grasp from a set of grasp poses based on distance and grasp score.
+    
+    Args:
+        grasp_pose_set: List of grasp poses [x, y, z, qx, qy, qz, qw]
+        grasp_scores: List of corresponding grasp scores [0, 1]
+        target_point: Optional target point [x, y, z] to grasp near (if None, uses box_filter)
+        box_filter: Optional bounding box tensor [center_x, center_y, width, height]
+        min_height: Minimum height (z) for valid grasps
+        
+    Returns:
+        int: Index of the best grasp in grasp_pose_set
+    """
+    try:
+        valid_indices = []
+        valid_centers = []
+        valid_scores = []
+        
+        for i, grasp in enumerate(grasp_pose_set):
+            if grasp[2] >= min_height:
+                valid_indices.append(i)
+                valid_centers.append(grasp[:2])  # xy coordinates
+                valid_scores.append(grasp_scores[i])  # corresponding grasp score
+        
+        # If no valid grasps, return the first grasp (or None if empty)
+        if len(valid_indices) == 0:
+            return 0 if len(grasp_pose_set) > 0 else None
+        
+        # If only one valid grasp, return it
+        if len(valid_indices) == 1:
+            return valid_indices[0]
+        
+        # Determine target point for distance calculation
+        if target_point is not None:
+            center = np.array([target_point[0], target_point[1]])
+        elif box_filter is not None:
+            # Convert bounding box to world coordinates
+            center = np.array([
+                box_filter[1] * 0.448 - 0.224,  # x coordinate
+                box_filter[0] * 0.448 + 0.276   # y coordinate
+            ])
+        else:
+            center = np.mean(valid_centers, axis=0)
+        
+        # Reshape center to 2D array for cdist
+        center = center.reshape(1, 2)
+        
+        # Calculate distances from center to each valid grasp
+        distances = cdist(center, valid_centers, metric='euclidean')
+        
+        # Combine distance and grasp score (e.g., weighted sum or product)
+        combined_scores = np.array(valid_scores) * np.exp(-distances.flatten())  # Example scoring method
+        
+        # Select the grasp with the highest combined score
+        best_grasp_idx = valid_indices[np.argmax(combined_scores)]
+
+        dist = distances[0, closest_idx]
+        rospy.loginfo(f"Selected grasp {best_grasp_idx} at distance {dist:.3f}m from target")
+        
+        return best_grasp_idx
+        
+    except Exception as e:
+        print(f"Error selecting best grasp: {e}")
+        return 0 if len(grasp_pose_set) > 0 else None
 
 def select_numbers(lst, threshold, max_above_threshold, total_count):
 
