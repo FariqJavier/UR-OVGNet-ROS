@@ -2,6 +2,7 @@ import rospy
 import os
 import sensor_msgs
 import numpy as np
+import open3d as o3d
 from typing import Union
 from torch import Tensor
 
@@ -18,7 +19,7 @@ from realsense_ros_utils.saving_image import (
 )
 
 from graspnet_ros_utils.grasp_detector import Graspnet
-from graspnet_ros_utils.processing_graspnet import get_single_fuse_pointcloud
+from graspnet_ros_utils.processing_graspnet import get_fuse_pointcloud
 
 def get_realsense_input (
     color_msg: sensor_msgs.msg.Image, 
@@ -73,7 +74,6 @@ def get_realsense_input (
         )
 
         return color_image, depth_image, camera_info
-
     except Exception as e:
         raise RuntimeError(f"Failed to get realsense input: {e}")
 
@@ -131,7 +131,7 @@ def get_groundingdino_inference (
         })
         output_path = os.path.join(output_dir, "result_groundingdino.jpg")
         output_image.save(output_path)
-        rospy.loginfo(f"Inference complete. Result saved to {output_path}")
+        # rospy.loginfo(f"Inference complete. Result saved to {output_path}")
 
         return box_filter, pred_label
     except Exception as e:
@@ -143,9 +143,7 @@ def get_graspnet_inference (
     dist_thresh: float,
     angle_thresh: int,
     mask_thresh: float,
-    color_image: np.ndarray,
-    depth_image: np.ndarray,
-    camera_info: any,
+    realsense_input_dict: any,
     box_filter: Tensor
     ):
     """
@@ -170,13 +168,20 @@ def get_graspnet_inference (
         )
 
         # Get pointcloud from input image
-        pcd = get_single_fuse_pointcloud(
-            camera_info=camera_info,
-            color_image_np=color_image,
-            depth_image_np=depth_image,
-            box_filter=box_filter,
+        fuse_pcd = get_fuse_pointcloud(
+            realsense_input_dict=realsense_input_dict,
+            box_filter=box_filter
         )
 
+        # Visualize the fused point cloud
+        o3d.visualization.draw_geometries([fuse_pcd])
+
+        # Save the fused point cloud to a file
+        fused_pcd_path = os.path.join(output_dir, "fused_point_cloud.pcd")
+        o3d.io.write_point_cloud(fused_pcd_path, fuse_pcd)
+        rospy.loginfo(f"Fused point cloud saved to: {fused_pcd_path}")
+
+        return fuse_pcd
     except Exception as e:
         raise RuntimeError(f"Failed to get graspnet inference: {e}")
 

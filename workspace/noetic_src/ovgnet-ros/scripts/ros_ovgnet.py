@@ -283,50 +283,7 @@ class OVGNetNode:
                     self.first_successful_frame = identifier
                     rospy.loginfo(f"Frame {identifier}: Marked as first successful GroundingDINO inference")
             else:
-                rospy.loginfo(f"Frame {identifier}: Failed GroundingDINO inference")
-
-            # # If using GPU, ensure the data is on the correct device
-            # if self.use_gpu:
-            #     # Note: This step depends on how your get_groundingdino_inference function works
-            #     # You might need to modify that function to accept a device parameter
-            #     box_filter, pred_label = get_groundingdino_inference(
-            #         config_path=self.config_path,
-            #         checkpoint_path=self.checkpoint_path,
-            #         text_prompt=self.text_prompt,
-            #         box_threshold=self.box_threshold,
-            #         text_threshold=self.text_threshold,
-            #         output_dir=os.path.join(self.output_dir, str(identifier)),
-            #         color_image=color_image_np,
-            #         token_spans=self.token_spans,
-            #         cpu_only=self.cpu_only,
-            #         device=self.device  # Pass device to inference function
-            #     )
-            # else:
-            #     # Original call for CPU
-            #     box_filter, pred_label = get_groundingdino_inference(
-            #         config_path=self.config_path,
-            #         checkpoint_path=self.checkpoint_path,
-            #         text_prompt=self.text_prompt,
-            #         box_threshold=self.box_threshold,
-            #         text_threshold=self.text_threshold,
-            #         output_dir=os.path.join(self.output_dir, str(identifier)),
-            #         color_image=color_image_np,
-            #         token_spans=self.token_spans,
-            #         cpu_only=self.cpu_only
-            #     )
-
-            # get_graspnet_inference(
-            #     checkpoint_path=self.graspnet_checkpoint_path,
-            #     refine_approach_dist=self.grapnet_refine_approach_dist,
-            #     dist_thresh=self.graspnet_dist_thresh,
-            #     angle_thresh=self.graspnet_angle_thresh,
-            #     mask_thresh=self.graspnet_mask_thresh,
-            #     color_image=color_image_np,
-            #     depth_image=depth_image_np,
-            #     camera_info=camera_info,
-            #     box_filter=box_filter[0]    # Pass the first index of the box filter since it only accept Tensor(0,4) not Tensor(1,4)
-            # )
-            # rospy.loginfo(f"Frame {identifier}: Completed graspnet inference")
+                rospy.logwarn(f"Frame {identifier}: Failed GroundingDINO inference, return empty bounding box")
 
             # Clear CUDA cache periodically to avoid memory issues
             if self.use_gpu and identifier % 10 == 0:
@@ -358,18 +315,17 @@ class OVGNetNode:
         
         # Run GraspNet on the first successful frame
         try:
-            grasp_poses, scores, approach_vectors = get_graspnet_inference(
+            fuse_pcd = get_graspnet_inference(
                 checkpoint_path=self.graspnet_checkpoint_path,
                 refine_approach_dist=self.grapnet_refine_approach_dist,
                 dist_thresh=self.graspnet_dist_thresh,
                 angle_thresh=self.graspnet_angle_thresh,
                 mask_thresh=self.graspnet_mask_thresh,
-                color_image=input_data.color_image_np,
-                depth_image=input_data.depth_image_np,
-                camera_info=input_data.camera_info,
+                realsense_input_dict = self.full_realsense_input,
                 box_filter=groundingdino_data.box_filter[0]
             )
-            
+            rospy.loginfo(f'Fuse pcd: {fuse_pcd}')
+
             rospy.loginfo(f"Completed GraspNet inference on frame {frame_id}")
             
             # Further processing of grasp results can be done here
