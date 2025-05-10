@@ -23,21 +23,11 @@ reconstruction_config = {
     'icp_max_iter': 2000,
     'translation_thresh': 3.95,
     'rotation_thresh': 0.02,
-    'max_correspondence_distance': 0.02
+    'max_correspondence_distance': 0.02,
+    'use_poisson': False,
+    'orient_for_grasping': True,  # Enable orientation correction
+    'debug_orientation': False    # Set to True to visualize orientation
 }
-
-# reconstruction_config = {
-#     'voxel_size': 0.005,            # Size for voxel downsampling
-#     'nb_neighbors': 100,             # Number of neighbors for outlier removal
-#     'std_ratio': 3.0,               # Standard deviation ratio for outlier removal
-#     'max_correspondence_distance': 0.04,  # Max distance for ICP correspondence
-#     'icp_max_iter': 3000,            # Maximum ICP iterations
-#     'icp_max_try': 10,               # Maximum ICP attempts
-#     'normal_radius': 0.01,          # Radius for normal estimation
-#     'normal_max_nn': 30,            # Max neighbors for normal estimation
-#     'translation_thresh': 4.0,      # Threshold for transformation trace
-#     'rotation_thresh': 0.05         # Threshold for transformation norm
-# }
 
 graspnet_config = {
     'graspnet_checkpoint_path': 'graspnet/graspnet/logs/log_rs/checkpoint.tar',
@@ -541,8 +531,219 @@ def process_pcds(pcds, reconstruction_config):
     # Ensure normals for the final result
     fused_pcd.estimate_normals()
     
+    # After fusion is complete, add orientation correction
+    if reconstruction_config.get('orient_for_grasping', True):
+        print("Orienting point cloud for top-down grasping...")
+        fused_pcd, orientation_transform = orient_for_top_grasping(
+            fused_pcd, 
+            debug=reconstruction_config.get('debug_orientation', False)
+        )
+        
+        # Update all transformations to include the orientation correction
+        for key in transformations:
+            transformations[key] = orientation_transform @ transformations[key]
+    
     print(f"Fusion complete. Final point cloud has {len(fused_pcd.points)} points.")
     return transformations, fused_pcd
+
+def detect_and_correct_orientation(pcd, method='pca'):
+    """
+    Detect the orientation of the point cloud and correct it to face upward.
+    
+    Args:
+        pcd: Open3D point cloud
+        method: 'pca' for PCA-based, 'ransac' for plane-fitting based
+    Returns:
+        corrected_pcd: Reoriented point cloud
+        transform: Applied transformation matrix
+    """
+    corrected_pcd = copy.deepcopy(pcd)
+    
+    if method == 'pca':
+        # Use PCA to find the principal axes
+        points = np.asarray(corrected_pcd.points)
+        centroid = np.mean(points, axis=0)
+        points_centered = points - centroid
+        
+        # Compute covariance matrix and eigenvalues/eigenvectors
+        cov = np.cov(points_centered.T)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        
+        # Sort eigenvectors by eigenvalues (largest to smallest)
+        idx = eigenvalues.argsort()[::-1]
+        eigenvectors = eigenvectors[:, idx]
+        
+        # The smallest eigenvector is often the "up" direction for flat objects
+        # We want this to align with the Z-axis
+        up_vector = eigenvectors[:, 2]
+        
+        # If the up vector points downward, flip it
+        if up_vector[2] < 0:
+            up_vector = -up_vector
+        
+        # Create rotation matrix to align up_vector with Z-axis
+        z_axis = np.array([0, 0, 1])
+        v = np.cross(up_vector, z_axis)
+        s = np.linalg.norm(v)
+        c = np.dot(up_vector, z_axis)
+        
+        if s < 1e-6:  # Vectors are already aligned
+            rotation = np.eye(3)
+        else:
+            vx = np.array([[0, -v[2], v[1]],
+                          [v[2], 0, -v[0]],
+                          [-v[1], v[0], 0]])
+            rotation = np.eye(3) + vx + np.dot(vx, vx) * ((1 - c) / (s * s))
+        
+        # Create transformation matrix
+        transform = np.eye(4)
+        transform[:3, :3] = rotation
+        transform[:3, 3] = -np.dot(rotation, centroid) + centroid
+        
+    elif method == 'ransac':
+        # Use RANSAC to fit a plane and align the object
+        plane_model, inliers = corrected_pcd.segment_plane(
+            distance_threshold=0.01,
+            ransac_n=3,
+            num_iterations=1000
+        )
+        
+        # Extract plane normal
+        normal = np.array(plane_model[:3])
+        
+        # Ensure normal points upward
+        if normal[2] < 0:
+            normal = -normal
+        
+        # Create rotation matrix to align normal with Z-axis
+        z_axis = np.array([0, 0, 1])
+        v = np.cross(normal, z_axis)
+        s = np.linalg.norm(v)
+        c = np.dot(normal, z_axis)
+        
+        if s < 1e-6:  # Vectors are already aligned
+            rotation = np.eye(3)
+        else:
+            vx = np.array([[0, -v[2], v[1]],
+                          [v[2], 0, -v[0]],
+                          [-v[1], v[0], 0]])
+            rotation = np.eye(3) + vx + np.dot(vx, vx) * ((1 - c) / (s * s))
+        
+        # Create transformation matrix
+        transform = np.eye(4)
+        transform[:3, :3] = rotation
+        
+        # Center the point cloud
+        points = np.asarray(corrected_pcd.points)
+        centroid = np.mean(points, axis=0)
+        transform[:3, 3] = -np.dot(rotation, centroid) + centroid
+    
+    # Apply transformation
+    corrected_pcd.transform(transform)
+    
+    return corrected_pcd, transform
+
+
+def detect_object_top_surface(pcd, percentile=90):
+    """
+    Detect the top surface of an object by analyzing point distribution.
+    
+    Args:
+        pcd: Open3D point cloud
+        percentile: Percentile of points to consider as "top"
+    Returns:
+        top_normal: Normal vector of the top surface
+    """
+    points = np.asarray(pcd.points)
+    normals = np.asarray(pcd.normals)
+    
+    # Find points in the top percentile by Z coordinate
+    z_threshold = np.percentile(points[:, 2], percentile)
+    top_indices = points[:, 2] >= z_threshold
+    
+    if np.sum(top_indices) < 10:
+        # Fallback to simpler method
+        return np.array([0, 0, 1])
+    
+    # Average the normals of top points
+    top_normals = normals[top_indices]
+    avg_normal = np.mean(top_normals, axis=0)
+    avg_normal = avg_normal / np.linalg.norm(avg_normal)
+    
+    # Ensure it points upward
+    if avg_normal[2] < 0:
+        avg_normal = -avg_normal
+    
+    return avg_normal
+
+
+def orient_for_top_grasping(pcd, debug=False):
+    """
+    Orient the point cloud specifically for top-down grasping.
+    This ensures the graspable surface is facing upward.
+    
+    Args:
+        pcd: Open3D point cloud
+        debug: If True, visualize the orientation process
+    Returns:
+        oriented_pcd: Properly oriented point cloud
+        transform: Applied transformation
+    """
+    oriented_pcd = copy.deepcopy(pcd)
+    
+    # Step 1: Initial orientation using PCA or RANSAC
+    oriented_pcd, transform1 = detect_and_correct_orientation(pcd, method='pca')
+    
+    # Step 2: Detect the actual top surface
+    oriented_pcd.estimate_normals()
+    top_normal = detect_object_top_surface(oriented_pcd)
+    
+    # Step 3: Fine-tune orientation based on top surface normal
+    z_axis = np.array([0, 0, 1])
+    angle = np.arccos(np.clip(np.dot(top_normal, z_axis), -1, 1))
+    
+    if angle > np.radians(10):  # If deviation is significant
+        # Compute rotation axis
+        rotation_axis = np.cross(top_normal, z_axis)
+        rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
+        
+        # Create rotation matrix using Rodrigues' formula
+        K = np.array([[0, -rotation_axis[2], rotation_axis[1]],
+                     [rotation_axis[2], 0, -rotation_axis[0]],
+                     [-rotation_axis[1], rotation_axis[0], 0]])
+        
+        rotation = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * np.dot(K, K)
+        
+        # Apply fine-tuning transformation
+        transform2 = np.eye(4)
+        transform2[:3, :3] = rotation
+        
+        oriented_pcd.transform(transform2)
+        transform = transform2 @ transform1
+    else:
+        transform = transform1
+    
+    # Step 4: Ensure the object is centered and sitting on a plane
+    points = np.asarray(oriented_pcd.points)
+    min_z = np.min(points[:, 2])
+    centroid = np.mean(points, axis=0)
+    
+    # Translate to origin and place on ground plane
+    translation = np.eye(4)
+    translation[:3, 3] = [-centroid[0], -centroid[1], -min_z]
+    
+    oriented_pcd.transform(translation)
+    transform = translation @ transform
+    
+    if debug:
+        # Visualize the orientation process
+        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+        o3d.visualization.draw_geometries(
+            [oriented_pcd, coord_frame],
+            window_name="Oriented Point Cloud for Top Grasping"
+        )
+    
+    return oriented_pcd, transform
 
 # def process_single_pcd(pcd, reconstruction_config):
 #     # Step 1: Apply statistical outlier removal to filter noise
@@ -1503,8 +1704,8 @@ def select_best_grasp(grasp_pose_set, grasp_scores, target_point=None, box_filte
         elif box_filter is not None:
             # Convert bounding box to world coordinates
             center = np.array([
-                box_filter[1] * 0.448 - 0.224,  # x coordinate
-                box_filter[0] * 0.448 + 0.276   # y coordinate
+                box_filter[1] * 848,  # x coordinate
+                box_filter[0] * 480   # y coordinate
             ])
         else:
             center = np.mean(valid_centers, axis=0)
