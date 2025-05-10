@@ -13,6 +13,7 @@ from scipy.spatial.transform import Rotation as R
 from scipy.spatial.distance import cdist
 import random
 import rospy
+import copy
 
 reconstruction_config = {
     'nb_neighbors': 50,
@@ -24,6 +25,19 @@ reconstruction_config = {
     'rotation_thresh': 0.02,
     'max_correspondence_distance': 0.02
 }
+
+# reconstruction_config = {
+#     'voxel_size': 0.005,            # Size for voxel downsampling
+#     'nb_neighbors': 100,             # Number of neighbors for outlier removal
+#     'std_ratio': 3.0,               # Standard deviation ratio for outlier removal
+#     'max_correspondence_distance': 0.04,  # Max distance for ICP correspondence
+#     'icp_max_iter': 3000,            # Maximum ICP iterations
+#     'icp_max_try': 10,               # Maximum ICP attempts
+#     'normal_radius': 0.01,          # Radius for normal estimation
+#     'normal_max_nn': 30,            # Max neighbors for normal estimation
+#     'translation_thresh': 4.0,      # Threshold for transformation trace
+#     'rotation_thresh': 0.05         # Threshold for transformation norm
+# }
 
 graspnet_config = {
     'graspnet_checkpoint_path': 'graspnet/graspnet/logs/log_rs/checkpoint.tar',
@@ -205,47 +219,330 @@ def get_heightmap_from_real_image(color, depth, segm, env):
 
     return cmap, hmap, mask
 
+# Helper function to create rotation matrices
+def get_rotation_matrix(rx, ry, rz):
+    """
+    Create a rotation matrix from Euler angles (in degrees)
+    
+    Args:
+        rx, ry, rz: Rotation angles in degrees around x, y, z axes
+    Returns:
+        4x4 transformation matrix
+    """
+    # Convert to radians
+    rx, ry, rz = np.radians([rx, ry, rz])
+    
+    # Rotation matrices around each axis
+    Rx = np.array([
+        [1, 0, 0],
+        [0, np.cos(rx), -np.sin(rx)],
+        [0, np.sin(rx), np.cos(rx)]
+    ])
+    
+    Ry = np.array([
+        [np.cos(ry), 0, np.sin(ry)],
+        [0, 1, 0],
+        [-np.sin(ry), 0, np.cos(ry)]
+    ])
+    
+    Rz = np.array([
+        [np.cos(rz), -np.sin(rz), 0],
+        [np.sin(rz), np.cos(rz), 0],
+        [0, 0, 1]
+    ])
+    
+    # Combined rotation matrix
+    R = Rz @ Ry @ Rx
+    
+    # Create 4x4 transform
+    transform = np.eye(4)
+    transform[:3, :3] = R
+    
+    return transform
+
+# def process_pcds(pcds, reconstruction_config):
+#     trans = dict()
+#     pcd = pcds[0]
+#     pcd.estimate_normals()
+#     pcd, _ = pcd.remove_statistical_outlier(
+#         nb_neighbors = reconstruction_config['nb_neighbors'],
+#         std_ratio = reconstruction_config['std_ratio']
+#     )
+#     for i in range(1, len(pcds)):
+#         voxel_size = reconstruction_config['voxel_size']
+#         income_pcd, _ = pcds[i].remove_statistical_outlier(
+#             nb_neighbors = reconstruction_config['nb_neighbors'],
+#             std_ratio = reconstruction_config['std_ratio']
+#         )
+#         income_pcd.estimate_normals()
+#         income_pcd = income_pcd.voxel_down_sample(voxel_size)
+#         transok_flag = False
+#         for _ in range(reconstruction_config['icp_max_try']): # try 5 times max
+#             reg_p2p = o3d.pipelines.registration.registration_icp(
+#                 income_pcd,
+#                 pcd,
+#                 reconstruction_config['max_correspondence_distance'],
+#                 np.eye(4, dtype = np.float),
+#                 o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+#                 o3d.pipelines.registration.ICPConvergenceCriteria(reconstruction_config['icp_max_iter'])
+#             )
+#             if (np.trace(reg_p2p.transformation) > reconstruction_config['translation_thresh']) \
+#                 and (np.linalg.norm(reg_p2p.transformation[:3, 3]) < reconstruction_config['rotation_thresh']):
+#                 # trace for transformation matrix should be larger than 3.5
+#                 # translation should less than 0.05
+#                 transok_flag = True
+#                 break
+#         if not transok_flag:
+#             reg_p2p.transformation = np.eye(4, dtype = np.float32)
+#         income_pcd = income_pcd.transform(reg_p2p.transformation)
+#         trans[i] = reg_p2p.transformation
+#         pcd = o3dp.merge_pcds([pcd, income_pcd])
+#         pcd = pcd.voxel_down_sample(voxel_size)
+#         pcd.estimate_normals()
+#     return trans, pcd
 
 def process_pcds(pcds, reconstruction_config):
-    trans = dict()
-    pcd = pcds[0]
-    pcd.estimate_normals()
-    pcd, _ = pcd.remove_statistical_outlier(
-        nb_neighbors = reconstruction_config['nb_neighbors'],
-        std_ratio = reconstruction_config['std_ratio']
-    )
-    for i in range(1, len(pcds)):
-        voxel_size = reconstruction_config['voxel_size']
-        income_pcd, _ = pcds[i].remove_statistical_outlier(
-            nb_neighbors = reconstruction_config['nb_neighbors'],
-            std_ratio = reconstruction_config['std_ratio']
-        )
-        income_pcd.estimate_normals()
-        income_pcd = income_pcd.voxel_down_sample(voxel_size)
-        transok_flag = False
-        for _ in range(reconstruction_config['icp_max_try']): # try 5 times max
-            reg_p2p = o3d.pipelines.registration.registration_icp(
-                income_pcd,
-                pcd,
-                reconstruction_config['max_correspondence_distance'],
-                np.eye(4, dtype = np.float),
-                o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-                o3d.pipelines.registration.ICPConvergenceCriteria(reconstruction_config['icp_max_iter'])
+    """
+    Advanced point cloud fusion with global registration and fine-tuning.
+    
+    Args:
+        pcds: List of point clouds to fuse
+        reconstruction_config: Configuration parameters
+    Returns:
+        trans: Dictionary of transformations
+        fused_pcd: Fused point cloud
+    """
+    if len(pcds) <= 1:
+        return {0: np.eye(4)}, pcds[0] if pcds else None
+    
+    # Clean and prepare all point clouds
+    processed_pcds = []
+    for i, pcd in enumerate(pcds):
+        # Make a copy to avoid modifying the original
+        pcd_copy = copy.deepcopy(pcd)
+        
+        # Remove outliers
+        if len(pcd_copy.points) > 100:
+            pcd_copy, _ = pcd_copy.remove_statistical_outlier(
+                nb_neighbors=reconstruction_config.get('nb_neighbors', 20),
+                std_ratio=reconstruction_config.get('std_ratio', 2.0)
             )
-            if (np.trace(reg_p2p.transformation) > reconstruction_config['translation_thresh']) \
-                and (np.linalg.norm(reg_p2p.transformation[:3, 3]) < reconstruction_config['rotation_thresh']):
-                # trace for transformation matrix should be larger than 3.5
-                # translation should less than 0.05
-                transok_flag = True
-                break
-        if not transok_flag:
-            reg_p2p.transformation = np.eye(4, dtype = np.float32)
-        income_pcd = income_pcd.transform(reg_p2p.transformation)
-        trans[i] = reg_p2p.transformation
-        pcd = o3dp.merge_pcds([pcd, income_pcd])
-        pcd = pcd.voxel_down_sample(voxel_size)
-        pcd.estimate_normals()
-    return trans, pcd
+        
+        # Apply DBSCAN clustering to get the main object and remove background noise
+        if len(pcd_copy.points) > 100:
+            labels = np.array(pcd_copy.cluster_dbscan(
+                eps=reconstruction_config.get('dbscan_eps', 0.02),
+                min_points=reconstruction_config.get('dbscan_min_points', 10)
+            ))
+            
+            if len(labels) > 0 and max(labels) >= 0:
+                # Keep only the largest cluster
+                largest_cluster = np.bincount(labels[labels >= 0]).argmax()
+                pcd_copy = pcd_copy.select_by_index(np.where(labels == largest_cluster)[0])
+        
+        # Ensure the point cloud has normals
+        pcd_copy.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(
+                radius=reconstruction_config.get('normal_radius', 0.02),
+                max_nn=reconstruction_config.get('normal_max_nn', 30)
+            )
+        )
+        
+        # Apply voxel downsampling
+        if reconstruction_config.get('voxel_size') and len(pcd_copy.points) > 0:
+            pcd_copy = pcd_copy.voxel_down_sample(reconstruction_config['voxel_size'])
+        
+        if len(pcd_copy.points) > 50:
+            processed_pcds.append(pcd_copy)
+    
+    if len(processed_pcds) <= 1:
+        return {0: np.eye(4)}, processed_pcds[0] if processed_pcds else None
+    
+    # Find the point cloud with the most points to use as reference
+    point_counts = [len(pcd.points) for pcd in processed_pcds]
+    ref_idx = np.argmax(point_counts)
+    target_pcd = processed_pcds[ref_idx]
+    
+    # Final fused point cloud
+    fused_pcd = copy.deepcopy(target_pcd)
+    transformations = {ref_idx: np.eye(4)}
+    
+    voxel_size = reconstruction_config.get('voxel_size', 0.005)
+    
+    # Compute FPFH features for target
+    target_down = target_pcd.voxel_down_sample(voxel_size * 3)
+    target_down.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5, max_nn=100)
+    )
+    target_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
+        target_down,
+        o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5, max_nn=100)
+    )
+    
+    # Process each source point cloud
+    for i, source_pcd in enumerate(processed_pcds):
+        if i == ref_idx:
+            continue
+            
+        print(f"Aligning point cloud {i} to reference...")
+        
+        # Compute FPFH features for source
+        source_down = source_pcd.voxel_down_sample(voxel_size * 3)
+        source_down.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5, max_nn=100)
+        )
+        source_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
+            source_down,
+            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5, max_nn=100)
+        )
+        
+        # Global registration using RANSAC with FPFH features
+        print("RANSAC global registration...")
+        registration_result = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
+            source_down, target_down, source_fpfh, target_fpfh,
+            mutual_filter=True,
+            max_correspondence_distance=voxel_size * 6,
+            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
+            ransac_n=3,
+            checkers=[
+                o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
+                o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(voxel_size * 6)
+            ],
+            criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(1000000, 0.999)
+        )
+        
+        print(f"Global registration fitness: {registration_result.fitness}")
+        initial_transform = registration_result.transformation
+        
+        # Try multiple strategies if global registration fails
+        if registration_result.fitness < 0.3:
+            print("Global registration unsuccessful, trying alternative strategies...")
+            
+            # Try alternative rotations (90-degree intervals around each axis)
+            rotations = []
+            for rx in [0, 90, 180, 270]:
+                for ry in [0, 90, 180, 270]:
+                    for rz in [0]:  # Limiting Z rotation for efficiency
+                        rotations.append(get_rotation_matrix(rx, ry, rz))
+            
+            best_fitness = 0
+            best_transform = np.eye(4)
+            
+            for rotation in rotations:
+                # Apply the rotation
+                source_rotated = copy.deepcopy(source_down)
+                source_rotated.transform(rotation)
+                
+                # Try ICP with this rotation
+                icp_result = o3d.pipelines.registration.registration_icp(
+                    source_rotated, target_down, voxel_size * 10, 
+                    np.eye(4),
+                    o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+                    o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=30)
+                )
+                
+                if icp_result.fitness > best_fitness:
+                    best_fitness = icp_result.fitness
+                    best_transform = rotation @ icp_result.transformation
+            
+            if best_fitness > registration_result.fitness:
+                initial_transform = best_transform
+                print(f"Alternative strategy successful, fitness: {best_fitness}")
+            
+            # If still poor alignment, try point cloud subsampling
+            if best_fitness < 0.3:
+                print("Trying subsampling strategy...")
+                
+                # Take different subsets of points to find better alignment
+                n_attempts = 5
+                subset_ratio = 0.7
+                
+                for attempt in range(n_attempts):
+                    # Randomly sample points
+                    n_points = len(source_down.points)
+                    indices = np.random.choice(n_points, int(n_points * subset_ratio), replace=False)
+                    source_subset = source_down.select_by_index(indices)
+                    
+                    # Try ICP with this subset
+                    icp_result = o3d.pipelines.registration.registration_icp(
+                        source_subset, target_down, voxel_size * 10, 
+                        np.eye(4),
+                        o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+                        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=30)
+                    )
+                    
+                    if icp_result.fitness > best_fitness:
+                        best_fitness = icp_result.fitness
+                        best_transform = icp_result.transformation
+                
+                if best_fitness > 0.3:
+                    initial_transform = best_transform
+                    print(f"Subsampling strategy successful, fitness: {best_fitness}")
+        
+        # Fine ICP registration with the initial transformation
+        print("Performing fine ICP registration...")
+        fine_icp_result = o3d.pipelines.registration.registration_icp(
+            source_pcd, target_pcd, voxel_size * 2,
+            initial_transform,
+            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+            o3d.pipelines.registration.ICPConvergenceCriteria(
+                max_iteration=reconstruction_config.get('icp_max_iter', 100),
+                relative_fitness=1e-6,
+                relative_rmse=1e-6
+            )
+        )
+        
+        print(f"Fine ICP fitness: {fine_icp_result.fitness}")
+        final_transform = fine_icp_result.transformation
+        
+        # Update the transformation dictionary
+        transformations[i] = final_transform
+        
+        # Transform and add to the fused point cloud
+        transformed_source = copy.deepcopy(source_pcd)
+        transformed_source.transform(final_transform)
+        fused_pcd += transformed_source
+    
+    # Final cleanup of the fused point cloud
+    print("Final cleanup and optimization...")
+    
+    # Remove outliers from the final point cloud
+    if len(fused_pcd.points) > 200:
+        fused_pcd, _ = fused_pcd.remove_statistical_outlier(
+            nb_neighbors=reconstruction_config.get('nb_neighbors', 20),
+            std_ratio=reconstruction_config.get('std_ratio', 2.0)
+        )
+    
+    # Apply Poisson surface reconstruction to get a smoother result
+    if reconstruction_config.get('use_poisson', False) and len(fused_pcd.points) > 200:
+        print("Applying Poisson surface reconstruction...")
+        fused_pcd.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(
+                radius=voxel_size * 2,
+                max_nn=30
+            )
+        )
+        with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Debug) as cm:
+            mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                fused_pcd, depth=8, width=0, scale=1.1, linear_fit=False
+            )
+        
+        # Convert mesh back to point cloud
+        pcd_from_mesh = mesh.sample_points_poisson_disk(
+            number_of_points=len(fused_pcd.points),
+            init_factor=5
+        )
+        fused_pcd = pcd_from_mesh
+    
+    # Final voxel downsampling to unify point density
+    if reconstruction_config.get('voxel_size') and len(fused_pcd.points) > 0:
+        fused_pcd = fused_pcd.voxel_down_sample(reconstruction_config['voxel_size'])
+    
+    # Ensure normals for the final result
+    fused_pcd.estimate_normals()
+    
+    print(f"Fusion complete. Final point cloud has {len(fused_pcd.points)} points.")
+    return transformations, fused_pcd
 
 # def process_single_pcd(pcd, reconstruction_config):
 #     # Step 1: Apply statistical outlier removal to filter noise
@@ -367,133 +664,287 @@ def process_pcds(pcds, reconstruction_config):
 #   Namun jika groundingdino hanya mampu mengenali 1 dari semua sudut maka icp dilakukan dengan input sudut itu sendiri
 #######################################################################################################################
 
-def get_fuse_pointcloud(realsense_input_dict, box_filter):
+# def get_fuse_pointcloud(realsense_input_dict, box_filter, frame_id):
+#     """
+#     Fuse the depth from all the angle to a single pointcloud
+    
+#     Args:
+#         realsense_input_dict: Hashmap of realsense input(color, depth, camera_info)
+#         box_filter: Bounding box tensor [center_x, center_y, width, height] of object
+#     Returns:
+#         fuse_pcd
+#     """
+#     try:
+#         rospy.loginfo(f"Box Filter: {box_filter}")
+
+#         box_filter_np = box_filter.numpy() if hasattr(box_filter, 'numpy') else np.array(box_filter)
+#         scaling_factor = 2.0
+#         x_offset = -0.3 
+#         y_offset = -0.3 
+
+#         box_filter[:2] -= box_filter[2:] / 2
+#         box_filter[2:] += box_filter[:2]
+#         a = box_filter.numpy()
+#         xtop = [(a[0] * scaling_factor), (a[1] * scaling_factor)]
+#         xdown = [(a[2] * scaling_factor), (a[3] * scaling_factor)]
+#         bounds = np.asarray([[xtop[1] + x_offset, xdown[1] + x_offset], [xtop[0] - y_offset, xdown[0] - y_offset], [-0.0001, 0.4]])
+#         rospy.loginfo(f"Adjusted Bounds: {bounds}")
+
+#         pcds = []
+#         for identifier, realsense_input in realsense_input_dict.items():
+#             color_image_np = realsense_input.color_image_np
+#             depth_image_np = realsense_input.depth_image_np
+#             camera_info = realsense_input.camera_info
+
+#             # Check if depth image is valid
+#             if np.all(depth_image_np == 0):
+#                 rospy.logwarn("Depth image contains all zeros - no valid depth data")
+#                 return None
+            
+#             # Convert depth to point cloud
+#             xyz = get_pointcloud(depth_image_np, camera_info["intrinsic_matrix"])
+            
+#             # # Reshape for easier handling
+#             # points_shape = xyz.shape
+#             # xyz_reshaped = xyz.reshape(-1, 3)
+        
+#             # Transform points from camera to world coordinates
+#             position = np.array(camera_info["position"]).reshape(3, 1)
+#             rotation = p.getMatrixFromQuaternion(camera_info["orientation"])
+#             rotation = np.array(rotation).reshape(3, 3)
+#             transform = np.eye(4)
+#             transform[:3, :] = np.hstack((rotation, position))
+#             # transform[:3, :3] = rotation
+#             # transform[:3, 3] = position.flatten()
+        
+#             # Apply transformation
+#             transformed_points = transform_pointcloud(xyz, transform)
+
+#             # Flatten the array to get all the points in a 2D array with shape (n_points, 3)
+#             flattened_points = transformed_points.reshape(-1, 3)
+
+#             # Get the x, y, z components
+#             x_values = flattened_points[:, 0]
+#             y_values = flattened_points[:, 1]
+#             z_values = flattened_points[:, 2]
+
+#             # Find the max, min, and mean for x, y, and z
+#             x_max, x_min, x_mean = np.max(x_values), np.min(x_values), np.mean(x_values)
+#             y_max, y_min, y_mean = np.max(y_values), np.min(y_values), np.mean(y_values)
+#             z_max, z_min, z_mean = np.max(z_values), np.min(z_values), np.mean(z_values)
+
+#             # Log the results
+#             rospy.loginfo(f"X: max={x_max}, min={x_min}, mean={x_mean}")
+#             rospy.loginfo(f"Y: max={y_max}, min={y_min}, mean={y_mean}")
+#             rospy.loginfo(f"Z: max={z_max}, min={z_min}, mean={z_mean}")
+        
+#             # Filter points within bounds
+#             ix = (transformed_points[:, 1] >= bounds[0, 0]) & (transformed_points[:, 1] <= bounds[0, 1])
+#             iy = (transformed_points[:, 0] >= bounds[1, 0]) & (transformed_points[:, 0] <= bounds[1, 1])
+#             iz = (transformed_points[:, 2] >= bounds[2, 0]) & (transformed_points[:, 2] <= bounds[2, 1])
+            
+#             # Log the number of points passing each filter
+#             rospy.loginfo(f"Points in X range: {np.sum(ix)}/{len(ix)}")
+#             rospy.loginfo(f"Points in Y range: {np.sum(iy)}/{len(iy)}")
+#             rospy.loginfo(f"Points in Z range: {np.sum(iz)}/{len(iz)}")
+            
+#             valid = ix & iy & iz
+#             total_valid = np.sum(valid)
+#             rospy.loginfo(f"Total valid points: {total_valid}/{len(valid)}")
+        
+#             if total_valid == 0:
+#                 rospy.logwarn("No points within bounds, returning empty point cloud")
+#                 return None
+#             if total_valid < 50:
+#                 rospy.logwarn(f"Very few points ({total_valid}) match all criteria, returning empty point cloud")
+#                 continue
+            
+#             filtered_points = transformed_points[valid]
+            
+#             # Reshape color image to match point cloud dimensions
+#             color_reshaped = color_image_np.reshape(-1, 3)
+#             filtered_colors = color_reshaped[valid]
+            
+#             # Sort 3D points by z-value for proper rendering
+#             iz = np.argsort(filtered_points[:, 2])
+#             sorted_points = filtered_points[iz]
+#             sorted_colors = filtered_colors[iz]
+            
+#             pcd = o3d.geometry.PointCloud()
+#             pcd.points = o3d.utility.Vector3dVector(sorted_points)
+#             pcd.colors = o3d.utility.Vector3dVector(sorted_colors / 255.0)
+        
+#             # Apply voxel downsampling
+#             if hasattr(pcd, 'voxel_down_sample') and reconstruction_config.get('voxel_size'):
+#                 pcd = pcd.voxel_down_sample(reconstruction_config['voxel_size'])
+
+#             # the first pcd is the one for start fusion
+#             pcds.append(pcd)
+        
+#         # Process the point cloud for fusion
+#         _, fuse_pcd = process_pcds(pcds, reconstruction_config)
+#         rospy.loginfo(f'Fuse_pcd: {fuse_pcd}')
+        
+#         return fuse_pcd
+#     except Exception as e:
+#         rospy.logerr(f"Failed to create single fuse cloudpoint: {e}")
+#         import traceback
+#         rospy.logerr(traceback.format_exc())
+#         return None
+
+def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_id=None):
     """
-    Fuse the depth from all the angle to a single pointcloud
+    Fuse the depth from all angles to a single pointcloud for an object
+    using bounding boxes from each camera.
     
     Args:
         realsense_input_dict: Hashmap of realsense input(color, depth, camera_info)
-        box_filter: Bounding box tensor [center_x, center_y, width, height] of object
+        groundingdino_output_dict: Dictionary of bounding boxes for each camera (camera_id -> box_filter)
+                         Each box_filter is [center_x, center_y, width, height]
+        frame_id: Optional reference frame ID (not required for this approach)
     Returns:
         fuse_pcd
     """
     try:
-        rospy.loginfo(f"Box Filter: {box_filter}")
-
-        box_filter_np = box_filter.numpy() if hasattr(box_filter, 'numpy') else np.array(box_filter)
-        
-        # Extract center and dimensions
-        x_center, y_center = box_filter_np[0], box_filter_np[1]
-        width, height = box_filter_np[2], box_filter_np[3]
-
-        scaling_factor = 0.1 
-        x_offset = -0.2 
-        y_offset = 0.1
-
         pcds = []
-        for identifier, realsense_input in realsense_input_dict.items():
+        
+        # Process each camera with its own bounding box
+        for camera_id, realsense_input in realsense_input_dict.items():
+            # Skip if no bounding box for this camera
+            if camera_id not in groundingdino_output_dict:
+                rospy.loginfo(f"No bounding box for camera {camera_id}, skipping")
+                continue
+                
+            box_filter = groundingdino_output_dict[camera_id].box_filter[0]
+            rospy.loginfo(f"Camera {camera_id} - Box Filter: {box_filter}")
+            
+            # Convert box_filter to numpy if it's a tensor
+            if hasattr(box_filter, 'numpy'):
+                box_filter_np = box_filter.numpy() 
+            else:
+                box_filter_np = np.array(box_filter)
+            
+            # Extract box coordinates (center_x, center_y, width, height)
+            center_x, center_y, width, height = box_filter_np
+            
+            # Get camera data
             color_image_np = realsense_input.color_image_np
             depth_image_np = realsense_input.depth_image_np
             camera_info = realsense_input.camera_info
-
-            # Check if depth image is valid
-            if np.all(depth_image_np == 0):
-                rospy.logwarn("Depth image contains all zeros - no valid depth data")
-                return None
             
-            # Convert depth to point cloud
-            xyz = get_pointcloud(depth_image_np, camera_info["intrinsic_matrix"])
+            # Get image dimensions
+            height_img, width_img = depth_image_np.shape[:2] if len(depth_image_np.shape) > 2 else depth_image_np.shape
             
-            # Reshape for easier handling
-            points_shape = xyz.shape
-            xyz_reshaped = xyz.reshape(-1, 3)
-        
-            # Transform points from camera to world coordinates
+            # Calculate pixel coordinates from normalized coordinates with margin
+            margin_w = width * 0.1  # 10% margin
+            margin_h = height * 0.1  # 10% margin
+            
+            x_min = max(0, (center_x - width/2 - margin_w) * width_img)
+            y_min = max(0, (center_y - height/2 - margin_h) * height_img)
+            x_max = min(width_img, (center_x + width/2 + margin_w) * width_img)
+            y_max = min(height_img, (center_y + height/2 + margin_h) * height_img)
+            
+            # Convert to integers
+            x_min, y_min = int(x_min), int(y_min)
+            x_max, y_max = int(x_max), int(y_max)
+            
+            rospy.loginfo(f"Camera {camera_id} - Bounding box in pixels: x_min={x_min}, y_min={y_min}, x_max={x_max}, y_max={y_max}")
+            
+            # Create a mask for the pixels within the bounding box
+            mask = np.zeros((height_img, width_img), dtype=bool)
+            mask[y_min:y_max, x_min:x_max] = True
+            
+            # Apply mask to depth image
+            masked_depth = np.copy(depth_image_np)
+            masked_depth[~mask] = 0
+            
+            # Skip if no valid depth in the masked region
+            if np.all(masked_depth == 0):
+                rospy.logwarn(f"Camera {camera_id} - No valid depth data in bounding box region")
+                continue
+                
+            # Convert masked depth to point cloud
+            xyz = get_pointcloud(masked_depth, camera_info["intrinsic_matrix"])
+            
+            # Apply transform to world coordinates
             position = np.array(camera_info["position"]).reshape(3, 1)
             rotation = p.getMatrixFromQuaternion(camera_info["orientation"])
             rotation = np.array(rotation).reshape(3, 3)
             transform = np.eye(4)
             transform[:3, :3] = rotation
             transform[:3, 3] = position.flatten()
-            # transform[:3, :] = np.hstack((rotation, position))
-        
-            # Apply transformation
-            # transformed_points = transform_pointcloud(xyz, transform)
-            points_homogeneous = np.hstack((xyz_reshaped, np.ones((xyz_reshaped.shape[0], 1))))
-            transformed_points = (transform @ points_homogeneous.T).T[:, :3]
-
-            # Log point cloud ranges for debugging
-            min_values = np.min(transformed_points, axis=0)
-            max_values = np.max(transformed_points, axis=0)
-            rospy.loginfo(f"Point cloud ranges: X: [{min_values[0]:.4f}, {max_values[0]:.4f}], "
-                        f"Y: [{min_values[1]:.4f}, {max_values[1]:.4f}], "
-                        f"Z: [{min_values[2]:.4f}, {max_values[2]:.4f}]")
-                
-            # Calculate bounds
-            x_bounds = [
-                min_values[1] + (x_center - width/2) * scaling_factor + x_offset,
-                max_values[1] + (x_center + width/2) * scaling_factor + x_offset
-            ]
-            y_bounds = [
-                min_values[0] + (y_center - height/2) * scaling_factor + y_offset,
-                max_values[0] + (y_center + height/2) * scaling_factor + y_offset
-            ]   
-            z_bounds = [0.2, 0.6]
-            bounds = np.array([
-                x_bounds,  # X bounds
-                y_bounds,  # Y bounds
-                z_bounds   # Z bounds
-            ])
-            rospy.loginfo(f"Adjusted Bounds: {bounds}")
-        
-            # Filter points within bounds
-            ix = (transformed_points[:, 1] >= bounds[0, 0]) & (transformed_points[:, 1] <= bounds[0, 1])
-            iy = (transformed_points[:, 0] >= bounds[1, 0]) & (transformed_points[:, 0] <= bounds[1, 1])
-            iz = (transformed_points[:, 2] >= bounds[2, 0]) & (transformed_points[:, 2] <= bounds[2, 1])
             
-            # Log the number of points passing each filter
-            rospy.loginfo(f"Points in X range: {np.sum(ix)}/{len(ix)}")
-            rospy.loginfo(f"Points in Y range: {np.sum(iy)}/{len(iy)}")
-            rospy.loginfo(f"Points in Z range: {np.sum(iz)}/{len(iz)}")
+            # Transform points to world coordinates
+            transformed_points = transform_pointcloud(xyz, transform)
             
-            valid = ix & iy & iz
-            total_valid = np.sum(valid)
-            rospy.loginfo(f"Total valid points: {total_valid}/{len(valid)}")
-        
-            if total_valid == 0:
-                rospy.logwarn("No points within bounds, returning empty point cloud")
-                return None
-            if total_valid < 50:
-                rospy.logwarn(f"Very few points ({total_valid}) match all criteria, returning empty point cloud")
+            # Filter out points with zero depth (outside the bounding box)
+            valid_points = (transformed_points[:,:,2] > 0)
+            if np.sum(valid_points) < 50:
+                rospy.logwarn(f"Camera {camera_id} - Not enough valid points ({np.sum(valid_points)}) in bounding box")
                 continue
+                
+            # Reshape for filtering
+            points_shape = transformed_points.shape
+            points_reshaped = transformed_points.reshape(-1, 3)
+            mask_reshaped = mask.reshape(-1)
             
-            filtered_points = transformed_points[valid]
+            # Filter points using the mask
+            filtered_points = points_reshaped[mask_reshaped & (points_reshaped[:,2] > 0)]
             
-            # Reshape color image to match point cloud dimensions
+            # Get corresponding colors
             color_reshaped = color_image_np.reshape(-1, 3)
-            filtered_colors = color_reshaped[valid]
+            filtered_colors = color_reshaped[mask_reshaped & (points_reshaped[:,2] > 0)]
             
-            # Sort 3D points by z-value for proper rendering
-            iz = np.argsort(filtered_points[:, 2])
-            sorted_points = filtered_points[iz]
-            sorted_colors = filtered_colors[iz]
+            # Log statistics
+            if len(filtered_points) > 0:
+                x_values = filtered_points[:, 0]
+                y_values = filtered_points[:, 1]
+                z_values = filtered_points[:, 2]
+                
+                rospy.loginfo(f"Camera {camera_id} - Filtered points stats:")
+                rospy.loginfo(f"X: max={np.max(x_values)}, min={np.min(x_values)}, mean={np.mean(x_values)}")
+                rospy.loginfo(f"Y: max={np.max(y_values)}, min={np.min(y_values)}, mean={np.mean(y_values)}")
+                rospy.loginfo(f"Z: max={np.max(z_values)}, min={np.min(z_values)}, mean={np.mean(z_values)}")
+                rospy.loginfo(f"Total valid points: {len(filtered_points)}")
             
+            # Create point cloud
             pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(sorted_points)
-            pcd.colors = o3d.utility.Vector3dVector(sorted_colors / 255.0)
-        
-            # Apply voxel downsampling
-            if hasattr(pcd, 'voxel_down_sample') and reconstruction_config.get('voxel_size'):
+            pcd.points = o3d.utility.Vector3dVector(filtered_points)
+            pcd.colors = o3d.utility.Vector3dVector(filtered_colors / 255.0)
+            
+            # Apply statistical outlier removal
+            if len(filtered_points) > 100:
+                pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+                rospy.loginfo(f"Camera {camera_id} - After outlier removal: {len(pcd.points)} points")
+            
+            # Apply voxel downsampling if configured
+            if len(pcd.points) > 0 and hasattr(pcd, 'voxel_down_sample') and reconstruction_config.get('voxel_size'):
                 pcd = pcd.voxel_down_sample(reconstruction_config['voxel_size'])
-
-            # the first pcd is the one for start fusion
-            pcds.append(pcd)
+                rospy.loginfo(f"Camera {camera_id} - After downsampling: {len(pcd.points)} points")
+            
+            # Add to point cloud list if enough points
+            if len(pcd.points) > 20:
+                pcds.append(pcd)
+                rospy.loginfo(f"Camera {camera_id} - Added point cloud with {len(pcd.points)} points")
         
-        # Process the point cloud for fusion
-        _, fuse_pcd = process_pcds(pcds, reconstruction_config)
-        rospy.loginfo(f'Fuse_pcd: {fuse_pcd}')
-        
-        return fuse_pcd
+        # Process point clouds for fusion
+        if len(pcds) == 0:
+            rospy.logwarn("No valid point clouds to merge")
+            return None
+        elif len(pcds) == 1:
+            rospy.loginfo("Only one valid point cloud, no fusion needed")
+            return pcds[0]
+        else:
+            # Use process_pcds function to align and merge the point clouds
+            _, fuse_pcd = process_pcds(pcds, reconstruction_config)
+            
+            if fuse_pcd is not None and len(fuse_pcd.points) > 0:
+                rospy.loginfo(f"Successfully fused {len(pcds)} point clouds, resulting in {len(fuse_pcd.points)} points")
+                return fuse_pcd
+            else:
+                rospy.logwarn("Fusion resulted in empty point cloud")
+                return None
+                
     except Exception as e:
         rospy.logerr(f"Failed to create single fuse cloudpoint: {e}")
         import traceback
