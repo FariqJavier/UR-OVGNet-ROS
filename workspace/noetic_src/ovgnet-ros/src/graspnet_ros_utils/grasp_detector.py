@@ -6,6 +6,7 @@ import copy
 import os
 import sys
 import rospkg
+import rospy
 
 rospack = rospkg.RosPack()
 
@@ -132,8 +133,8 @@ class Graspnet:
                     
         return grasp_pose_set, grasp_poses, remain_gg
 
-    def filter_grasps_by_score_and_angle(self, gg, min_score=0.15):
-        """Filter grasps by score and angle with gravity"""
+    def filter_grasps_by_score_and_angle(self, gg, min_score=0.15, top_down_only=True):
+        """Filter grasps by score and angle with gravity - optionally only keep top-down grasps"""
         # Filter by score
         del_index = []
         for index, value in enumerate(gg):
@@ -159,24 +160,50 @@ class Graspnet:
         eelink_rs[:,:,1] = -rs[:,:,1]  # Gripper y-axis
         eelink_rs[:,:,2] = rs[:,:,0]   # Gripper z-axis
         
-        # Filter by angle with gravity (z-axis)
-        # Approach vector should be pointing downward
-        angle_mask = (rs[:, 2, 0] < -np.cos(self.angle_thresh / 180.0 * np.pi))
-        
-        # If too few grasps pass the angle filter, use all grasps sorted by angle
-        if np.sum(angle_mask) < self.mask_thresh:
-            # Calculate angle with gravity for all grasps
-            angles = np.arccos(-rs[:, 2, 0]) * 180.0 / np.pi
-            # Sort by angle
-            sorted_indices = np.argsort(angles)
-            filtered_gg = gg[sorted_indices[:20]]  # Take top 20 grasps with best angle
-            return filtered_gg, eelink_rs[sorted_indices[:20]]
+        if top_down_only:
+            # Stricter filtering for top-down grasps
+            top_down_angle_thresh = 45.0  # degrees (adjust as needed)
+            
+            # The approach vector should point downward
+            angle_mask = (rs[:, 2, 0] < -np.cos(top_down_angle_thresh / 180.0 * np.pi))
+            
+            # Additionally, filter based on the grasp approach direction
+            # The grasp should approach from above (positive to negative z)
+            approach_vectors = rs[:, :, 0]  # Approach direction in graspnet frame
+            approach_from_above_mask = approach_vectors[:, 2] < -0.7  # z-component should be negative
+            
+            # Combine both conditions
+            combined_mask = angle_mask & approach_from_above_mask
+            
+            if np.sum(combined_mask) < 1:
+                rospy.logwarn("No top-down grasps found. Using best available grasps...")
+                # Fall back to best angle grasps
+                angles = np.arccos(-rs[:, 2, 0]) * 180.0 / np.pi
+                sorted_indices = np.argsort(angles)
+                num_grasps = min(10, len(gg))
+                filtered_gg = gg[sorted_indices[:num_grasps]]
+                return filtered_gg, eelink_rs[sorted_indices[:num_grasps]]
+            else:
+                # Use grasps that pass both filters
+                filtered_gg = gg[combined_mask]
+                sorted_indices = np.argsort(-scores[combined_mask])
+                num_grasps = min(20, len(filtered_gg))
+                filtered_gg = filtered_gg[sorted_indices[:num_grasps]]
+                return filtered_gg, eelink_rs[combined_mask][sorted_indices[:num_grasps]]
         else:
-            # Use grasps that pass angle filter, sort by score
-            filtered_gg = gg[angle_mask]
-            sorted_indices = np.argsort(-scores[angle_mask])  # Negative for descending
-            filtered_gg = filtered_gg[sorted_indices[:20]]  # Take top 20 grasps with best scores
-            return filtered_gg, eelink_rs[angle_mask][sorted_indices[:20]]
+            # Original angle filtering
+            angle_mask = (rs[:, 2, 0] < -np.cos(self.angle_thresh / 180.0 * np.pi))
+            
+            if np.sum(angle_mask) < self.mask_thresh:
+                angles = np.arccos(-rs[:, 2, 0]) * 180.0 / np.pi
+                sorted_indices = np.argsort(angles)
+                filtered_gg = gg[sorted_indices[:20]]
+                return filtered_gg, eelink_rs[sorted_indices[:20]]
+            else:
+                filtered_gg = gg[angle_mask]
+                sorted_indices = np.argsort(-scores[angle_mask])
+                filtered_gg = filtered_gg[sorted_indices[:20]]
+                return filtered_gg, eelink_rs[angle_mask][sorted_indices[:20]]
 
     def convert_grasps_to_poses(self, gg, eelink_rs):
         """Convert GraspGroup to a list of grasp poses (position + quaternion)"""
@@ -184,11 +211,16 @@ class Graspnet:
         geometries = []
         scores = []
         
+        # Get the arrays from the GraspGroup
+        translations = gg.translations
+        rotation_matrices = gg.rotation_matrices
+        depths = gg.depths
+        gg_scores = gg.scores
+        
         for i in range(len(gg)):
             # Add visualization geometry
             geometries.append(gg[i].to_open3d_geometry())
-
-            scores.append(gg[i].score)
+            scores.append(gg_scores[i])
             
             # Get grasp rotation matrix
             grasp_rotation_matrix = eelink_rs[i]
@@ -199,7 +231,7 @@ class Graspnet:
             
             # Convert to position + quaternion format
             grasp_pose = np.zeros(7)
-            grasp_pose[:3] = gg[i].translations + gg[i].rotation_matrices[:,:,0] * gg[i].depths  # Position
+            grasp_pose[:3] = translations[i] + rotation_matrices[i,:,0] * depths[i]  # Position
             r = R.from_matrix(grasp_rotation_matrix)
             grasp_pose[3:] = r.as_quat()  # Quaternion
             
@@ -207,7 +239,7 @@ class Graspnet:
         
         return grasp_poses, geometries, scores
     
-    def grasp_detection_real_world(self, full_pcd, min_score=0.15):
+    def grasp_detection_real_world(self, full_pcd, get_visual, min_score=0.15, top_down_only=True):
         """
         Generate grasping poses for a real-world setting without known object poses.
         
@@ -236,7 +268,7 @@ class Graspnet:
                 return [], []
             
             # Filter grasps by score and angle
-            filtered_gg, eelink_rs = self.filter_grasps_by_score_and_angle(gg, min_score)
+            filtered_gg, eelink_rs = self.filter_grasps_by_score_and_angle(gg, min_score, top_down_only)
             
             # Log number of grasps after filtering
             rospy.loginfo(f"Filtered to {len(filtered_gg)} grasp candidates")
@@ -249,7 +281,7 @@ class Graspnet:
             grasp_poses, geometries, scores = self.convert_grasps_to_poses(filtered_gg, eelink_rs)
             
             # Optional visualization
-            if False:  # Set to True for debugging
+            if get_visual:  # Set to True for debugging
                 frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
                 o3d.visualization.draw_geometries([frame, full_pcd] + geometries)
                 
