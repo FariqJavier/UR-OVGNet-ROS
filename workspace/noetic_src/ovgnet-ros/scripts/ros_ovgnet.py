@@ -324,7 +324,8 @@ class OVGNetNode:
                 realsense_input_dict = self.full_realsense_input,
                 groundingdino_output_dict=self.full_groundingdino_output,
                 output_dir=os.path.join(self.output_dir, str(frame_id)),
-                frame_id=frame_id
+                frame_id=frame_id,
+                visualize=True
             )
             rospy.loginfo(f'Fuse pcd: {fuse_pcd}')
 

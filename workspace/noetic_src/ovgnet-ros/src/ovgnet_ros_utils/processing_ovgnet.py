@@ -1,5 +1,6 @@
 import rospy
 import os
+import json
 import sensor_msgs
 import numpy as np
 import open3d as o3d
@@ -146,16 +147,26 @@ def get_graspnet_inference (
     realsense_input_dict: any,
     groundingdino_output_dict: any,
     output_dir: str,
-    frame_id: int
+    frame_id: int,
+    visualize: bool = False
     ):
     """
-    Run GraspNet prediction on the point cloud
+    Run GraspNet prediction on the point cloud and save visualizations
     
     Args:
-        
+        checkpoint_path: Path to the GraspNet checkpoint
+        refine_approach_dist: Distance for approach refinement (meters)
+        dist_thresh: Distance threshold for grasp assignment (meters)
+        angle_thresh: Angle threshold for grasp filtering (degrees)
+        mask_thresh: Minimum number of grasps required
+        realsense_input_dict: Dictionary with realsense data
+        groundingdino_output_dict: Dictionary with grounding DINO output
+        output_dir: Directory to save output files
+        frame_id: Current frame ID
+        visualize: Whether to show visualizations (default: False)
     
     Returns:
-        grasp_poses: Predicted grasp poses
+        tuple: (fuse_pcd, grasp_poses, scores) - point cloud, grasp poses and their scores
     """
     try:
         # Initialize Graspnet
@@ -178,41 +189,112 @@ def get_graspnet_inference (
         # o3d.visualization.draw_geometries([fuse_pcd])
 
         # Save the fused point cloud to a file
-        fused_pcd_path = os.path.join(output_dir, "fused_point_cloud.pcd")
+        fused_pcd_path = os.path.join(output_dir, f"fused_point_cloud_{str(frame_id)}.pcd")
         o3d.io.write_point_cloud(fused_pcd_path, fuse_pcd)
         rospy.loginfo(f"Fused point cloud saved to: {fused_pcd_path}")
 
         # Generate grasp pose from graspnet
-        grasp_poses, geometries, scores = graspnet.grasp_detection_real_world(fuse_pcd, get_visual=True, top_down_only=True)
+        grasp_poses, geometries, scores = graspnet.grasp_detection_real_world(
+            fuse_pcd, 
+            get_visual=False, 
+            top_down_only=True
+        )
 
+        # Save grasp data as JSON
+        grasp_data = []
+        for i, (pose, score) in enumerate(zip(grasp_poses, scores)):
+            grasp_data.append({
+                "id": i,
+                "position": [float(p) for p in pose[:3]],
+                "orientation": [float(q) for q in pose[3:7]],
+                "score": float(score)
+            })
+        
+        with open(os.path.join(output_dir, f"grasp_data_{str(frame_id)}.json"), 'w') as f:
+            json.dump(grasp_data, f, indent=2)
+
+        # Log grasp results
+        if len(grasp_poses) > 0:
+            rospy.loginfo(f"Found {len(grasp_poses)} valid grasps")
+            best_score = scores[0]
+            best_pose = grasp_poses[0]
+            rospy.loginfo(f"Best grasp score: {best_score:.4f}")
+            rospy.loginfo(f"Best grasp position: [{best_pose[0]:.4f}, {best_pose[1]:.4f}, {best_pose[2]:.4f}]")
+        else:
+            rospy.logerr("No valid grasp poses found")
+            return fuse_pcd, [], []
+
+        # Create visualization outputs
+        # 1. Save individual grasps meshes
+        grasp_dir = os.path.join(output_dir, f"grasps_{str(frame_id)}")
+        os.makedirs(grasp_dir, exist_ok=True)
+        
+        for i, geom in enumerate(geometries):
+            grasp_path = os.path.join(grasp_dir, f"grasp_{i}_score_{scores[i]:.4f}.ply")
+            o3d.io.write_triangle_mesh(grasp_path, geom)
+        
+        # 2. Save combined grasp visualization
+        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+        
+        # Color the grasps by their score (red=low, green=high)
+        for i, geom in enumerate(geometries):
+            # Normalize score to 0-1
+            normalized_score = scores[i]
+            # Create color mapping (red to green based on score)
+            color = np.array([1.0 - normalized_score, normalized_score, 0.0])
+            # Apply color to the mesh
+            geom.paint_uniform_color(color)
+        
         # Combine all grasp geometries into one mesh
         combined_grasps = o3d.geometry.TriangleMesh()
         for geom in geometries:
             combined_grasps += geom
         
         # Save combined grasps
-        grasps_path = f"grasps_poses.ply"
-        o3d.io.write_triangle_mesh(grasps_path, combined_grasps)
-        rospy.loginfo(f"Saved grasps to {grasps_path}")
+        combined_path = os.path.join(output_dir, f"combined_grasps_{str(frame_id)}.ply")
+        o3d.io.write_triangle_mesh(combined_path, combined_grasps)
+        rospy.loginfo(f"Saved combined grasps to {combined_path}")
         
-        # Save entire scene
-        scene_geometries = [fuse_pcd] + geometries
-        scene_path = f"grasp_poses_with_scene.ply"
+        # 3. Create a full scene visualization with the best grasp highlighted
+        if len(geometries) > 0:
+            # Highlight the best grasp in blue
+            geometries[0].paint_uniform_color([0.0, 0.5, 1.0])  # Blue for best grasp
+            
+            # Create a screenshot of the scene with the best grasp
+            vis = o3d.visualization.Visualizer()
+            vis.create_window(visible=visualize)
+            vis.add_geometry(fuse_pcd)
+            vis.add_geometry(coord_frame)
+            
+            # Add all grasps
+            for geom in geometries:
+                vis.add_geometry(geom)
+                
+            # Set view
+            view_control = vis.get_view_control()
+            view_control.set_front([0, 0, -1])  # View from front
+            view_control.set_up([0, -1, 0])     # Up direction
+            view_control.set_zoom(0.7)
+            
+            # Update visualization and capture the image
+            vis.poll_events()
+            vis.update_renderer()
+            
+            # Save image
+            image_path = os.path.join(output_dir, f"grasp_scene_{str(frame_id)}.png")
+            vis.capture_screen_image(image_path)
+            rospy.loginfo(f"Saved visualization image to {image_path}")
+            
+            # If visualize is True, show the window
+            if visualize:
+                rospy.loginfo("Showing visualization window. Close the window to continue.")
+                vis.run()
+            
+            vis.destroy_window()
         
-        # Convert to point cloud for combined saving
-        combined_pcd = o3d.geometry.PointCloud()
-        for geom in scene_geometries:
-            if isinstance(geom, o3d.geometry.PointCloud):
-                combined_pcd += geom
-            elif isinstance(geom, o3d.geometry.TriangleMesh):
-                # Convert mesh to point cloud
-                mesh_pcd = geom.sample_points_uniformly(number_of_points=1000)
-                combined_pcd += mesh_pcd
-        
-        o3d.io.write_point_cloud(scene_path, combined_pcd)
-        rospy.loginfo(f"Saved scene to {scene_path}")
+        # Return both the point cloud and grasp information
+        return fuse_pcd, grasp_poses, scores
 
-        return fuse_pcd
     except Exception as e:
         raise RuntimeError(f"Failed to get graspnet inference: {e}")
 
