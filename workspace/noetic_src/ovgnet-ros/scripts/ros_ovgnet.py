@@ -322,7 +322,9 @@ class OVGNetNode:
                 angle_thresh=self.graspnet_angle_thresh,
                 mask_thresh=self.graspnet_mask_thresh,
                 realsense_input_dict = self.full_realsense_input,
-                box_filter=groundingdino_data.box_filter[0]
+                groundingdino_output_dict=self.full_groundingdino_output,
+                output_dir=os.path.join(self.output_dir, str(frame_id)),
+                frame_id=frame_id
             )
             rospy.loginfo(f'Fuse pcd: {fuse_pcd}')
 

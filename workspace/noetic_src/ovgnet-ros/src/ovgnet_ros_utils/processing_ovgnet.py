@@ -144,15 +144,15 @@ def get_graspnet_inference (
     angle_thresh: int,
     mask_thresh: float,
     realsense_input_dict: any,
-    box_filter: Tensor
+    groundingdino_output_dict: any,
+    output_dir: str,
+    frame_id: int
     ):
     """
     Run GraspNet prediction on the point cloud
     
     Args:
-        pcd: Open3D point cloud
-        graspnet_config: Configuration for GraspNet
-        box_filter (Tensor(0,4)): The first index of the bounding box generated from groundingdino
+        
     
     Returns:
         grasp_poses: Predicted grasp poses
@@ -170,16 +170,47 @@ def get_graspnet_inference (
         # Get pointcloud from input image
         fuse_pcd = get_fuse_pointcloud(
             realsense_input_dict=realsense_input_dict,
-            box_filter=box_filter
+            groundingdino_output_dict=groundingdino_output_dict,
+            frame_id=frame_id
         )
 
-        # Visualize the fused point cloud
-        o3d.visualization.draw_geometries([fuse_pcd])
+        # # Visualize the fused point cloud
+        # o3d.visualization.draw_geometries([fuse_pcd])
 
         # Save the fused point cloud to a file
         fused_pcd_path = os.path.join(output_dir, "fused_point_cloud.pcd")
         o3d.io.write_point_cloud(fused_pcd_path, fuse_pcd)
         rospy.loginfo(f"Fused point cloud saved to: {fused_pcd_path}")
+
+        # Generate grasp pose from graspnet
+        grasp_poses, geometries, scores = graspnet.grasp_detection_real_world(fuse_pcd, get_visual=True, top_down_only=True)
+
+        # Combine all grasp geometries into one mesh
+        combined_grasps = o3d.geometry.TriangleMesh()
+        for geom in geometries:
+            combined_grasps += geom
+        
+        # Save combined grasps
+        grasps_path = f"grasps_poses.ply"
+        o3d.io.write_triangle_mesh(grasps_path, combined_grasps)
+        rospy.loginfo(f"Saved grasps to {grasps_path}")
+        
+        # Save entire scene
+        scene_geometries = [fuse_pcd] + geometries
+        scene_path = f"grasp_poses_with_scene.ply"
+        
+        # Convert to point cloud for combined saving
+        combined_pcd = o3d.geometry.PointCloud()
+        for geom in scene_geometries:
+            if isinstance(geom, o3d.geometry.PointCloud):
+                combined_pcd += geom
+            elif isinstance(geom, o3d.geometry.TriangleMesh):
+                # Convert mesh to point cloud
+                mesh_pcd = geom.sample_points_uniformly(number_of_points=1000)
+                combined_pcd += mesh_pcd
+        
+        o3d.io.write_point_cloud(scene_path, combined_pcd)
+        rospy.loginfo(f"Saved scene to {scene_path}")
 
         return fuse_pcd
     except Exception as e:
