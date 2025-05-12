@@ -9,6 +9,7 @@ import torch
 import open3d as o3d
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image, CameraInfo
+from geometry_msgs.msg import PoseStamped
 from graspnetAPI import GraspGroup
 from std_msgs.msg import Bool
 from PIL import Image as PILImage
@@ -25,7 +26,8 @@ sys.path.append(os.path.join(OVGNET_ROS_DIR, 'src'))
 from ovgnet_ros_utils.processing_ovgnet import (
     get_realsense_input,
     get_groundingdino_inference,
-    get_graspnet_inference
+    get_graspnet_inference,
+    create_pose_msg
 )
 
 class RealsenseData:
@@ -42,10 +44,11 @@ class GroundingDinoData:
 class OVGNetNode:
     def __init__(self):
         rospy.init_node('ros_graspnet_node')
-        color_sub = rospy.Subscriber('/camera/color/image_raw', Image, self.color_callback)
-        depth_sub = rospy.Subscriber('/camera/aligned_depth_to_color/image_raw', Image, self.depth_callback)
-        camera_info_sub = rospy.Subscriber('/camera/aligned_depth_to_color/camera_info', CameraInfo, self.camera_info_callback)
-        camera_status_sub = rospy.Subscriber('/start_motion', Bool, self.camera_status_callback)
+        self.color_sub = rospy.Subscriber('/camera/color/image_raw', Image, self.color_callback)
+        self.depth_sub = rospy.Subscriber('/camera/aligned_depth_to_color/image_raw', Image, self.depth_callback)
+        self.camera_info_sub = rospy.Subscriber('/camera/aligned_depth_to_color/camera_info', CameraInfo, self.camera_info_callback)
+        self.camera_status_sub = rospy.Subscriber('/start_motion', Bool, self.camera_status_callback)
+        self.best_grasp_pose_pub = rospy.Publisher('/best_grasp_pose', PoseStamped, queue_size=10)
 
         self.output_dir = rospy.get_param('~output_dir', None)
         self.image_height = rospy.get_param('~image_height', 480.0)
@@ -94,58 +97,6 @@ class OVGNetNode:
         # Add a rate limiter to prevent overwhelming the queue
         self.last_enqueue_time = 0
         self.min_enqueue_interval = 1.0  # Minimum seconds between enqueueing new frames
-
-    # def camera_status_callback(self, msg):
-    #     if self.latest_color is None or self.latest_depth is None or self.camera_info is None:
-    #         rospy.logwarn("Waiting for color, depth, and camera info messages ...")
-    #         return
-    #     if self.config_path is None or self.checkpoint_path is None or self.output_dir is None:
-    #         rospy.logerr("Cannot find required path ...")
-    #         return
-    #     if self.text_prompt is None:
-    #         rospy.logerr("Text prompt need to be specified ...")
-        
-    #     try:
-    #         if msg.data == True:
-    #             self.identifier += 1
-
-    #         if msg.data == False:
-    #             self.identifier = 0
-    #             rospy.loginfo("Processing image finished")
-    #             return
-
-    #         color_image_np, depth_image_np, camera_info = get_realsense_input (
-    #             color_msg = self.latest_color,
-    #             depth_msg = self.latest_depth,
-    #             camera_info_msg = self.camera_info, 
-    #             image_height = self.image_height,
-    #             image_width = self.image_width,
-    #             ws_margin_lr = self.mask_margin_lr,
-    #             ws_margin_tb = self.mask_margin_tb,
-    #             output_dir = os.path.join(self.output_dir, str(self.identifier)),
-    #             identifier = str(self.identifier),
-    #             enable_color = self.enable_color,
-    #             enable_depth = self.enable_depth,
-    #             enable_camera_info = self.camera_info,
-    #             use_mask = self.use_mask
-    #         )
-    #         rospy.loginfo("Getting input from Intel Realsense D455 ...")
-
-    #         box_filter, pred_label = get_groundingdino_inference (
-    #             config_path = self.config_path,
-    #             checkpoint_path = self.checkpoint_path,
-    #             text_prompt = self.text_prompt,
-    #             box_threshold = self.box_threshold,
-    #             text_threshold = self.text_threshold,
-    #             output_dir = os.path.join(self.output_dir, str(self.identifier)),
-    #             color_image = color_image_np,
-    #             token_spans = self.token_spans,
-    #             cpu_only = self.cpu_only
-    #         )
-    #         rospy.loginfo("Getting groundingdino inference")
-    #     except Exception as e:
-    #         rospy.logerr(f"Failed to save images: {e}")
-    #         return
 
     def camera_info_callback(self, msg):
         self.camera_info = msg
@@ -295,7 +246,7 @@ class OVGNetNode:
                 torch.cuda.empty_cache()  # Try to clear GPU memory on error
 
     def wait_and_run_graspnet(self):
-        """Wait for all processing to complete, then run GraspNet on the first successful frame"""
+        """Wait for all processing to complete, then run GraspNet on the first successful frame and publish the best grasp pose"""
         # Wait for the processing queue to be empty
         while not self.processing_queue.empty():
             rospy.loginfo("Waiting for all frames to be processed...")
@@ -308,14 +259,12 @@ class OVGNetNode:
         
         # Get the data for the first successful frame
         frame_id = self.first_successful_frame
-        input_data = self.full_realsense_input[frame_id]
-        groundingdino_data = self.full_groundingdino_output[frame_id]
         
         rospy.loginfo(f"All processing complete. Running GraspNet on frame {frame_id}")
         
         # Run GraspNet on the first successful frame
         try:
-            fuse_pcd = get_graspnet_inference(
+            fuse_pcd, best_pose, best_score = get_graspnet_inference(
                 checkpoint_path=self.graspnet_checkpoint_path,
                 refine_approach_dist=self.grapnet_refine_approach_dist,
                 dist_thresh=self.graspnet_dist_thresh,
@@ -327,13 +276,18 @@ class OVGNetNode:
                 frame_id=frame_id,
                 visualize=True
             )
-            rospy.loginfo(f'Fuse pcd: {fuse_pcd}')
 
             rospy.loginfo(f"Completed GraspNet inference on frame {frame_id}")
             
-            # Further processing of grasp results can be done here
-            # For example, publishing the grasp pose to a motion planning node
-            
+            rospy.loginfo(f'Best Grasp Score: {best_score}')
+            rospy.loginfo(f'Best Grasp Pose: {best_pose}')
+
+            pose_msg = create_pose_msg(
+                grasp_pose=best_pose,
+                frame_id='world'
+            )
+
+            self.best_grasp_pose_pub.publish(pose_msg)
         except Exception as e:
             rospy.logerr(f"Failed GraspNet inference on frame {frame_id}: {e}")
             if self.use_gpu:

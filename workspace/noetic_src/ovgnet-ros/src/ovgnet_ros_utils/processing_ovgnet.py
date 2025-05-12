@@ -6,6 +6,7 @@ import numpy as np
 import open3d as o3d
 from typing import Union
 from torch import Tensor
+import geometry_msgs.msg
 
 from groundingdino_ros_utils.processing_groundingdino import (
     load_image,
@@ -218,8 +219,8 @@ def get_graspnet_inference (
             rospy.loginfo(f"Found {len(grasp_poses)} valid grasps")
             best_score = scores[0]
             best_pose = grasp_poses[0]
-            rospy.loginfo(f"Best grasp score: {best_score:.4f}")
-            rospy.loginfo(f"Best grasp position: [{best_pose[0]:.4f}, {best_pose[1]:.4f}, {best_pose[2]:.4f}]")
+            # rospy.loginfo(f"Best grasp score: {best_score:.4f}")
+            # rospy.loginfo(f"Best grasp position: [{best_pose[0]:.4f}, {best_pose[1]:.4f}, {best_pose[2]:.4f}]")
         else:
             rospy.logerr("No valid grasp poses found")
             return fuse_pcd, [], []
@@ -292,15 +293,36 @@ def get_graspnet_inference (
             
             vis.destroy_window()
         
-        # Return both the point cloud and grasp information
-        return fuse_pcd, grasp_poses, scores
+        # Return both the fuse point cloud, best grasp pose, and best grasp score
+        return fuse_pcd, best_pose, best_score
 
     except Exception as e:
         raise RuntimeError(f"Failed to get graspnet inference: {e}")
 
-    
+def create_pose_msg(
+    grasp_pose: np.ndarray, 
+    frame_id: str = "world"
+    ) -> geometry_msgs.msg.PoseStamped:
+    """
+    Creates a geometry_msgs.msg.PoseStamped object.
 
-# def save_graspnet_inference ():
+    Args:
+        grasp_pose: List representation of 6DoF grasp pose
+        frame_id: Frame reference of the pose
 
+    Return:
+        PoseStamped object of the grasp pose
+    """
+    pose_stamped = geometry_msgs.msg.PoseStamped()
+    pose_stamped.header.stamp = rospy.Time.now() # Or get time from appropriate source
+    pose_stamped.header.frame_id = frame_id # Frame this pose is defined in
+    pose_stamped.pose.position.x = grasp_pose[0]
+    pose_stamped.pose.position.y = grasp_pose[1]
+    pose_stamped.pose.position.z = grasp_pose[2]
 
-# def calculate_motion_planning ():
+    pose_stamped.pose.orientation.x = grasp_pose[3]
+    pose_stamped.pose.orientation.y = grasp_pose[4]
+    pose_stamped.pose.orientation.z = grasp_pose[5]
+    pose_stamped.pose.orientation.w = grasp_pose[6]
+
+    return pose_stamped
