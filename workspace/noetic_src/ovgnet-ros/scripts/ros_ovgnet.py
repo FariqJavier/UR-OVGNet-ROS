@@ -27,6 +27,7 @@ from ovgnet_ros_utils.processing_ovgnet import (
     get_realsense_input,
     get_groundingdino_inference,
     get_graspnet_inference,
+    get_graspnet_inference_on_multiview,
     create_pose_msg
 )
 
@@ -68,9 +69,9 @@ class OVGNetNode:
         self.groundingdino_cpu_only = rospy.get_param("~groundingdino_cpu_only", False)
         self.graspnet_checkpoint_path = rospy.get_param("~graspnet_checkpoint_path", None)
         self.grapnet_refine_approach_dist = rospy.get_param("~grapnet_refine_approach_dist", 0.01)
-        self.graspnet_dist_thresh = rospy.get_param("~graspnet_dist_thresh", 0.05)
-        self.graspnet_angle_thresh = rospy.get_param("~graspnet_angle_thresh", 15)
-        self.graspnet_mask_thresh = rospy.get_param("~graspnet_mask_thresh", 0.5)
+        self.graspnet_dist_thresh = rospy.get_param("~graspnet_dist_thresh", 0.1)
+        self.graspnet_angle_thresh = rospy.get_param("~graspnet_angle_thresh", 30)
+        self.graspnet_mask_thresh = rospy.get_param("~graspnet_mask_thresh", 1)
         os.makedirs(self.output_dir, exist_ok=True)
         self.identifier = 0
         self.full_realsense_input = {}
@@ -264,7 +265,20 @@ class OVGNetNode:
         
         # Run GraspNet on the first successful frame
         try:
-            fuse_pcd, best_pose, best_score = get_graspnet_inference(
+            # fuse_pcd, best_pose, best_score = get_graspnet_inference(
+            #     checkpoint_path=self.graspnet_checkpoint_path,
+            #     refine_approach_dist=self.grapnet_refine_approach_dist,
+            #     dist_thresh=self.graspnet_dist_thresh,
+            #     angle_thresh=self.graspnet_angle_thresh,
+            #     mask_thresh=self.graspnet_mask_thresh,
+            #     realsense_input_dict = self.full_realsense_input,
+            #     groundingdino_output_dict=self.full_groundingdino_output,
+            #     output_dir=os.path.join(self.output_dir, str(frame_id)),
+            #     frame_id=frame_id,
+            #     visualize=True
+            # )
+
+            best_pose, best_score, best_confidence, best_distance, best_angle, best_reachability_score = get_graspnet_inference_on_multiview(
                 checkpoint_path=self.graspnet_checkpoint_path,
                 refine_approach_dist=self.grapnet_refine_approach_dist,
                 dist_thresh=self.graspnet_dist_thresh,
@@ -279,8 +293,12 @@ class OVGNetNode:
 
             rospy.loginfo(f"Completed GraspNet inference on frame {frame_id}")
             
-            rospy.loginfo(f'Best Grasp Score: {best_score}')
             rospy.loginfo(f'Best Grasp Pose: {best_pose}')
+            rospy.loginfo(f'Best Grasp Score: {best_score}')
+            rospy.loginfo(f'Best Grasp Confidence: {best_confidence}')
+            rospy.loginfo(f'Best Grasp Distance: {best_distance}')
+            rospy.loginfo(f'Best Grasp Angle: {best_angle}')
+            rospy.loginfo(f'Best Grasp Reachability Score: {best_reachability_score}')
 
             pose_msg = create_pose_msg(
                 grasp_pose=best_pose,
