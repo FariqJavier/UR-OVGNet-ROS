@@ -291,41 +291,8 @@ class Graspnet:
             rospy.logerr(f"Error in grasp detection: {e}")
             import traceback
             rospy.logerr(traceback.format_exc())
-            return [], []
+            return [], [], []
 
-    # def  grasp_detection(self, full_pcd, object_poses=None):
-    #     '''
-    #     Generate object 6d poses and grasping poses.
-    #     Only geometry infomation is used in this implementation.
-
-    #     There are mainly three steps.
-    #     - Moving the camera to different predefined locations and capture RGBD images. Reconstruct the 3D scene.
-    #     - Generating objects 6d poses by mainly icp matching.
-    #     - Generating grasping poses by graspnet-baseline.
-
-    #     Args:
-    #         object_list(list): strings of object names.
-    #         pose_method: string of the 6d pose estimation method, "icp" or "superglue".
-    #     Returns:
-    #         dict, dict: object 6d poses and grasp poses.
-    #     '''
-
-    #     # generate grasping poses in a scene
-    #     gg = self.compute_grasp_pose(full_pcd)
-    #     del_index = []
-    #     for index, value in enumerate(gg):
-    #         if value.score < 0.15:
-    #             del_index.append(index)
-    #     for i in reversed(del_index):
-    #         gg.remove(i)
-
-    #     grasp_pose_set, grasp_pose_dict, remain_gg = self.assign_grasp_pose(gg, object_poses)
-        
-    #     # visualization
-    #     # frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
-    #     # o3d.visualization.draw_geometries([frame, full_pcd, *gg.to_open3d_geometry_list()])
-
-    #     return grasp_pose_set, grasp_pose_dict, remain_gg
     def grasp_detection(self, full_pcd, object_poses=None):
         '''
         Generate object 6d poses and grasping poses.
