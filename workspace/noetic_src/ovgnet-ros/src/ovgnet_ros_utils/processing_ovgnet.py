@@ -7,6 +7,7 @@ import open3d as o3d
 from typing import Union
 from torch import Tensor
 import geometry_msgs.msg
+from scipy.spatial.transform import Rotation as R
 
 from groundingdino_ros_utils.processing_groundingdino import (
     load_image,
@@ -21,7 +22,11 @@ from realsense_ros_utils.saving_image import (
 )
 
 from graspnet_ros_utils.grasp_detector import Graspnet
-from graspnet_ros_utils.processing_graspnet import get_fuse_pointcloud
+from graspnet_ros_utils.multiview_grasp_planner import MultiViewGraspPlanner
+from graspnet_ros_utils.processing_graspnet import (
+    get_fuse_pointcloud,
+    get_single_pointcloud
+)
 
 def get_realsense_input (
     color_msg: sensor_msgs.msg.Image, 
@@ -295,6 +300,138 @@ def get_graspnet_inference (
         
         # Return both the fuse point cloud, best grasp pose, and best grasp score
         return fuse_pcd, best_pose, best_score
+
+    except Exception as e:
+        raise RuntimeError(f"Failed to get graspnet inference: {e}")
+
+def get_graspnet_inference_on_multiview (
+    checkpoint_path: str,
+    refine_approach_dist: float,
+    dist_thresh: float,
+    angle_thresh: int,
+    mask_thresh: float,
+    realsense_input_dict: any,
+    groundingdino_output_dict: any,
+    output_dir: str,
+    frame_id: int,
+    visualize: bool = False
+    ):
+    """
+    Run GraspNet prediction on the point cloud and save visualizations
+    
+    Args:
+        checkpoint_path: Path to the GraspNet checkpoint
+        refine_approach_dist: Distance for approach refinement (meters)
+        dist_thresh: Distance threshold for grasp assignment (meters)
+        angle_thresh: Angle threshold for grasp filtering (degrees)
+        mask_thresh: Minimum number of grasps required
+        realsense_input_dict: Dictionary with realsense data
+        groundingdino_output_dict: Dictionary with grounding DINO output
+        output_dir: Directory to save output files
+        frame_id: Current frame ID
+        visualize: Whether to show visualizations (default: False)
+    
+    Returns:
+        tuple: (fuse_pcd, grasp_poses, scores) - point cloud, grasp poses and their scores
+    """
+    try:
+        # Initialize Graspnet
+        graspnet = Graspnet(
+            checkpoint_path=checkpoint_path,
+            refine_approach_dist=refine_approach_dist,
+            dist_thresh=dist_thresh,
+            angle_thresh=angle_thresh,
+            mask_thresh=mask_thresh
+        )
+
+        # Initialize the multi-view planner
+        planner = MultiViewGraspPlanner(graspnet, robot_base_frame='base_link')
+
+        # Generate grasps from multiple views
+        grasp_candidates = planner.plan_multiview_grasps(
+            realsense_inputs=realsense_input_dict,
+            detection_results=groundingdino_output_dict,
+            get_visual=visualize  # For debugging
+        )
+
+        # Save grasp data as JSON
+        grasp_data = []
+        for i, grasp in enumerate(grasp_candidates):
+            pose_matrix = grasp.pose  # This is a 4x4 matrix
+            
+            # Extract translation
+            position = pose_matrix[:3, 3]
+
+            # Extract rotation matrix and convert to quaternion
+            rotation = pose_matrix[:3, :3]
+            quat = R.from_matrix(rotation).as_quat()  # returns [x, y, z, w]
+
+            grasp_data.append({
+                "id": i,
+                "position": position.tolist(),
+                "orientation": quat.tolist(),
+                "score": float(grasp.score),
+                "confidence": float(grasp.confidence),
+                "distance_to_robot": float(grasp.distance_to_robot),
+                "view_angle": float(grasp.view_angle),
+                "reachability_score": float(grasp.reachability_score)
+            })
+        
+        with open(os.path.join(output_dir, f"grasp_data_{str(frame_id)}.json"), 'w') as f:
+            json.dump(grasp_data, f, indent=2)
+
+        # Log grasp results
+        if len(grasp_candidates) > 0:
+            rospy.loginfo(f"Found {len(grasp_candidates)} valid grasps")
+            best_pose = grasp_candidates[0]
+            best_score = grasp_candidates[0].score
+            best_confidence = grasp_candidates[0].confidence
+            best_distance_to_robot = grasp_candidates[0].distance_to_robot
+            best_view_angle = grasp_candidates[0].view_angle
+            best_reachability_score = grasp_candidates[0].reachability_score
+            # rospy.loginfo(f"Best grasp score: {best_score:.4f}")
+            # rospy.loginfo(f"Best grasp position: [{best_pose[0]:.4f}, {best_pose[1]:.4f}, {best_pose[2]:.4f}]")
+            # rospy.loginfo(f"Best grasp Confidence: {best_confidence:.3f}")
+            # rospy.loginfo(f"Best grasp Distance: {best_distance:.3f} m")
+            # rospy.loginfo(f"Best grasp  View angle: {best_angle:.1f} degrees")
+            # rospy.loginfo(f"Best grasp  Reachability: {best_reachability_score:.1f}")
+            
+        else:
+            rospy.logerr("No valid grasp poses found")
+            return [], [], []
+
+        # Create visualization outputs
+        # 1. Save individual grasps meshes
+        grasp_dir = os.path.join(output_dir, f"grasps_{str(frame_id)}")
+        os.makedirs(grasp_dir, exist_ok=True)
+        
+        for i, g in enumerate(grasp_candidates):
+            grasp_path = os.path.join(grasp_dir, f"grasp_{i}_score_{g.score:.4f}.ply")
+            o3d.io.write_triangle_mesh(grasp_path, g.geometry)
+
+            # Normalize score to 0-1
+            normalized_score = g.score[i]
+            # Create color mapping (red to green based on score)
+            color = np.array([1.0 - normalized_score, normalized_score, 0.0])
+            # Apply color to the mesh
+            g.geometry.paint_uniform_color(color)
+
+        
+        # 2. Save combined grasp visualization
+        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+        
+        # Combine all grasp geometries into one mesh
+        combined_grasps = o3d.geometry.TriangleMesh()
+        for grasp in grasp_candidates:
+            combined_grasps += grasp.geometry
+        
+        # Save combined grasps
+        combined_path = os.path.join(output_dir, f"combined_grasps_{str(frame_id)}.ply")
+        o3d.io.write_triangle_mesh(combined_path, combined_grasps)
+        rospy.loginfo(f"Saved combined grasps to {combined_path}")
+        
+        # Return both the best grasp pose with its score, confidence, distance, view angle, and reachability score
+        return best_pose, best_score, best_confidence, best_distance_to_robot, best_view_angle, best_reachability_score
 
     except Exception as e:
         raise RuntimeError(f"Failed to get graspnet inference: {e}")
