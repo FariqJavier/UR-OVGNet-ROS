@@ -8,6 +8,7 @@ import numpy as np
 from typing import Union
 import tf2_ros
 from tf.transformations import quaternion_multiply, quaternion_from_euler
+from scipy.spatial.transform import Rotation as R
 
 def create_and_publish_mask(
         height: int = 450,
@@ -240,7 +241,7 @@ def get_camera_info(
     except Exception as e:
         raise RuntimeError(f"Failed to find camera info file: {e}")
         
-def get_color_and_depth_image (
+def get_color_and_depth_image(
     color_msg: sensor_msgs.msg.Image, 
     depth_msg: sensor_msgs.msg.Image, 
     camera_info_msg: sensor_msgs.msg.CameraInfo, 
@@ -251,32 +252,15 @@ def get_color_and_depth_image (
     enable_depth: bool = False,
     enable_camera_info: bool = False,
     use_mask: bool = True,
-    ) -> tuple[Union[np.ndarray, None], Union[np.ndarray, None], Union[any, None]]:
+) -> tuple[Union[np.ndarray, None], Union[np.ndarray, None], Union[any, None]]:
     """
-    Get and save color and depth images from specified paths.
-    Args:
-        color_msg: sensor_msgs.msg.Image, 
-        depth_msg: sensor_msgs.msg.Image, 
-        camera_info_msg: sensor_msgs.msg.CameraInfo, 
-        output_dir: str,
-        identifier: str,
-        workspace_mask: np.ndarray = None
-        enable_color (bool): Flag to load color image.
-        enable_depth (bool): Flag to load depth image.
-        enable_camera_info (bool): Flag to load camera intrinsic parameters.
-        use_mask (bool): Flag to load masked images.
-    Returns:
-        Tuple: Paths to the color image, depth image, and camera info path.
+    Fixed version that properly handles camera transforms for eye-in-hand setup
     """
-
+    
     # Setup TF listener
     tfBuffer = tf2_ros.Buffer()
     listener = tf2_ros.TransformListener(tfBuffer)
-
-
-    # # Wait for the transform to be available
-    # rospy.sleep(1.0)  # Ensure TF2 has time to populate the buffer
-
+    
     try:
         if not color_msg or not depth_msg or not camera_info_msg:
             raise ValueError("Received empty image messages")
@@ -286,16 +270,16 @@ def get_color_and_depth_image (
             raise ValueError("Identifier must be provided.")
         
         bridge = CvBridge()
-
+        
         # Convert ROS Image messages to OpenCV images
         raw_color_image = bridge.imgmsg_to_cv2(color_msg, desired_encoding="bgr8")
         raw_depth_image = bridge.imgmsg_to_cv2(depth_msg, depth_msg.encoding)
-
-         # Save images
+        
+        # Save images
         raw_color_path = os.path.join(output_dir, f'raw_color_{identifier}.png')
         raw_depth_path = os.path.join(output_dir, f'raw_depth_{identifier}.png')
         cv2.imwrite(raw_color_path, raw_color_image)
-
+        
         # Get camera intrinsic parameters
         fx = camera_info_msg.K[0]
         fy = camera_info_msg.K[4]
@@ -306,82 +290,130 @@ def get_color_and_depth_image (
             [0,  fy, cy],
             [0,  0,  1]
         ], dtype=np.float32)
-        intrinsic_matrix_inv = np.linalg.inv(intrinsic_matrix)
-
-        # # Example pixel coordinates
-        # u, v = (raw_depth_image.shape[1] / 2), (raw_depth_image.shape[0] / 2)  # Center pixel of the image
         
-        # # Get depth at (u, v)
-        # center_raw_depth_value = raw_depth_image[v, u]  # Get the depth value at pixel (u, v)
-        
-        # # Convert pixel (u, v) and depth to camera coordinates
-        # point_camera = np.dot(intrinsic_matrix_inv, np.array([u * center_raw_depth_value, v * center_raw_depth_value, center_raw_depth_value]))
-        
-        # Get transformation from camera_link to base_link (or robot base)
-        transform = tfBuffer.lookup_transform('base_link', 'camera_link', rospy.Time(0), rospy.Duration(1.0))
-        position_camera = np.array([transform.transform.translation.x,
-                                    transform.transform.translation.y,
-                                    transform.transform.translation.z])
-        orientation_camera = np.array([transform.transform.rotation.x,
-                                            transform.transform.rotation.y,
-                                            transform.transform.rotation.z,
-                                            transform.transform.rotation.w])
+        # FIX 1: Get the correct transform direction
+        # For point cloud transformation, we need camera_link to base_link
+        try:
+            # Wait for transform to be available
+            rospy.loginfo("Waiting for camera transform...")
+            transform = tfBuffer.lookup_transform('base_link', 'camera_color_optical_frame', rospy.Time(0), rospy.Duration(5.0))
             
-        # # Transform camera coordinates to world coordinates
-        # point_world = np.dot(rotation_matrix_camera, point_camera) + position_camera
-        workspace_limits = np.asarray([
-            [-5.75, 5.75],  # X-axis limits based on horizontal FOV and depth
-            [-4.35, 4.35],  # Y-axis limits based on vertical FOV and depth
-            [0.2, 10.0]     # Z-axis limits based on depth range (min to max)
-        ])
-
-        # Graspnet needs depth in meters
+            # Debug the transform
+            rospy.loginfo(f"Camera frame: {transform.child_frame_id}")
+            rospy.loginfo(f"Base frame: {transform.header.frame_id}")
+            
+            # Extract position and orientation
+            position_camera = np.array([
+                transform.transform.translation.x,
+                transform.transform.translation.y,
+                transform.transform.translation.z
+            ])
+            
+            # FIX 2: Store quaternion in consistent format [x, y, z, w]
+            orientation_camera = np.array([
+                transform.transform.rotation.x,
+                transform.transform.rotation.y,
+                transform.transform.rotation.z,
+                transform.transform.rotation.w
+            ])
+            
+            # FIX 3: Debug the camera orientation
+            r = R.from_quat(orientation_camera)
+            rotation_matrix = r.as_matrix()
+            
+            rospy.loginfo(f"Camera position: {position_camera}")
+            rospy.loginfo(f"Camera rotation matrix:\n{rotation_matrix}")
+            
+            # Check if camera is pointing downward (for eye-in-hand)
+            z_axis = rotation_matrix[:, 2]  # Camera's Z-axis
+            rospy.loginfo(f"Camera Z-axis (should point down): {z_axis}")
+            
+            if z_axis[2] > -0.5:
+                rospy.logwarn("WARNING: Camera might not be pointing downward properly!")
+                rospy.logwarn(f"Z-component: {z_axis[2]} (should be negative)")
+            
+        except tf2_ros.LookupException as e:
+            rospy.logerr(f"Transform lookup failed: {e}")
+            rospy.logerr("Available frames:")
+            rospy.logerr(tfBuffer.all_frames_as_string())
+            raise
+        except tf2_ros.ExtrapolationException as e:
+            rospy.logerr(f"Transform extrapolation failed: {e}")
+            raise
+        
+        # Process depth image
         if raw_depth_image.dtype == np.uint16:
             # Depth in millimeters (RealSense/ZED/others)
             depth_np = raw_depth_image.astype(np.float32) / 1000.0 
         elif raw_depth_image.dtype == np.float32:
-            # Depth in meters
+            # Depth already in meters
             depth_np = raw_depth_image.copy()
         else:
-            raise ValueError("Unsupported depth image type")
-
-        np.save(os.path.join(output_dir, f'raw_depth_{identifier}.npy'), depth_np)  # Save as numpy array to preserve float values
-        cv2.imwrite(raw_depth_path, (depth_np * 1000).astype(np.uint16))  # Save visualization as PNG
-
+            raise ValueError(f"Unsupported depth image type: {raw_depth_image.dtype}")
+        
+        # Save depth data
+        np.save(os.path.join(output_dir, f'raw_depth_{identifier}.npy'), depth_np)
+        cv2.imwrite(raw_depth_path, (depth_np * 1000).astype(np.uint16))
+        
+        # FIX 4: Improved workspace limits for eye-in-hand
+        # These should be in the camera frame, not global frame
+        workspace_limits = np.asarray([
+            [-0.5, 0.5],    # X-axis limits (left-right from camera view)
+            [-0.4, 0.4],    # Y-axis limits (up-down from camera view)  
+            [0.2, 1.0]      # Z-axis limits (depth from camera)
+        ])
+        
+        # Create metadata with proper formatting
         meta = {
             'intrinsic_matrix': intrinsic_matrix,
             'position': position_camera,
-            'orientation': orientation_camera,
+            'orientation': orientation_camera,  # [x, y, z, w] format
             'workspace_limits': workspace_limits,
             'pixel_size': 1 / fx,
-            'image_size': raw_color_image.shape[:2]
+            'image_size': raw_color_image.shape[:2],
+            # Add debugging info
+            'transform_info': {
+                'source_frame': transform.header.frame_id,
+                'target_frame': transform.child_frame_id,
+                'timestamp': transform.header.stamp.to_sec()
+            }
         }
-    
-        scio.savemat(os.path.join(output_dir, f'meta_{identifier}.mat'), meta)  # Save metadata as .mat file
-
-        # Load workspace mask
-        workspace_mask = workspace_mask > 0  # Convert to boolean mask
-
-        # Apply mask to original color image for visualization
-        masked_color_image = np.zeros_like(raw_color_image)
-        masked_color_image[workspace_mask] = raw_color_image[workspace_mask]
-
-        # Apply mask to original depth image for visualization
-        masked_depth_image = np.zeros_like(depth_np)
-        masked_depth_image[workspace_mask] = depth_np[workspace_mask]
-
-        # Save masked image
-        cv2.imwrite(os.path.join(output_dir, f'masked_color_{identifier}.png'), cv2.cvtColor(masked_color_image, cv2.COLOR_RGB2BGR))
-        cv2.imwrite(os.path.join(output_dir, f'masked_depth_{identifier}.png'), (masked_depth_image * 1000).astype(np.uint16))
-        np.save(os.path.join(output_dir, f'masked_depth_{identifier}.npy'), masked_depth_image)
-
+        
+        # Save metadata
+        scio.savemat(os.path.join(output_dir, f'meta_{identifier}.mat'), meta)
+        
+        # Process workspace mask if provided
+        if workspace_mask is not None:
+            workspace_mask = workspace_mask > 0
+            
+            # Apply mask to images
+            masked_color_image = np.zeros_like(raw_color_image)
+            masked_color_image[workspace_mask] = raw_color_image[workspace_mask]
+            
+            masked_depth_image = np.zeros_like(depth_np)
+            masked_depth_image[workspace_mask] = depth_np[workspace_mask]
+            
+            # Save masked images
+            cv2.imwrite(os.path.join(output_dir, f'masked_color_{identifier}.png'), 
+                       cv2.cvtColor(masked_color_image, cv2.COLOR_RGB2BGR))
+            cv2.imwrite(os.path.join(output_dir, f'masked_depth_{identifier}.png'), 
+                       (masked_depth_image * 1000).astype(np.uint16))
+            np.save(os.path.join(output_dir, f'masked_depth_{identifier}.npy'), masked_depth_image)
+        else:
+            masked_color_image = raw_color_image
+            masked_depth_image = depth_np
+        
         rospy.loginfo(f"Saved images and metadata to {output_dir}")
-
+        
+        # Return appropriate data based on flags
         color_image = (masked_color_image if use_mask else raw_color_image) if enable_color else None
         depth_image = (masked_depth_image if use_mask else depth_np) if enable_depth else None
         camera_info = meta if enable_camera_info else None
-
-        return color_image, depth_image, camera_info        
-
+        
+        return color_image, depth_image, camera_info
+        
     except Exception as e:
+        rospy.logerr(f"Failed to get color and depth image: {e}")
+        import traceback
+        rospy.logerr(traceback.format_exc())
         raise RuntimeError(f"Failed to get color and depth image: {e}")
