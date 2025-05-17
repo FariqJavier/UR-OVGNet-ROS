@@ -8,6 +8,7 @@ from typing import Union
 from torch import Tensor
 import geometry_msgs.msg
 from scipy.spatial.transform import Rotation as R
+# import tf2_geometry_msgs
 
 from groundingdino_ros_utils.processing_groundingdino import (
     load_image,
@@ -185,7 +186,7 @@ def get_graspnet_inference (
         )
 
         # Get pointcloud from input image
-        fuse_pcd = get_fuse_pointcloud(
+        fused_pcd_world, fused_pcd_canonical, fused_trans_world, fused_trans_canonical = get_fuse_pointcloud(
             realsense_input_dict=realsense_input_dict,
             groundingdino_output_dict=groundingdino_output_dict,
             frame_id=frame_id
@@ -195,14 +196,20 @@ def get_graspnet_inference (
         # o3d.visualization.draw_geometries([fuse_pcd])
 
         # Save the fused point cloud to a file
-        fused_pcd_path = os.path.join(output_dir, f"fused_point_cloud_{str(frame_id)}.pcd")
-        o3d.io.write_point_cloud(fused_pcd_path, fuse_pcd)
-        rospy.loginfo(f"Fused point cloud saved to: {fused_pcd_path}")
+        fused_pcd_world_path = os.path.join(output_dir, f"fused_point_cloud__world_{str(frame_id)}.pcd")
+        o3d.io.write_point_cloud(fused_pcd_world_path, fused_pcd_world)
+        rospy.loginfo(f"Fused point cloud saved to: {fused_pcd_world_path}")
+
+        fused_pcd_canonical_path = os.path.join(output_dir, f"fused_point_cloud_canonical_{str(frame_id)}.pcd")
+        o3d.io.write_point_cloud(fused_pcd_canonical_path, fused_pcd_canonical)
+        rospy.loginfo(f"Fused point cloud saved to: {fused_pcd_canonical_path}")
 
         # Generate grasp pose from graspnet
         grasp_poses, geometries, scores = graspnet.grasp_detection_real_world(
-            fuse_pcd, 
-            get_visual=False, 
+            fused_pcd_world,
+            fused_pcd_canonical, 
+            fused_trans_canonical,
+            get_visual=True, 
             top_down_only=True
         )
 
@@ -228,7 +235,7 @@ def get_graspnet_inference (
             # rospy.loginfo(f"Best grasp position: [{best_pose[0]:.4f}, {best_pose[1]:.4f}, {best_pose[2]:.4f}]")
         else:
             rospy.logerr("No valid grasp poses found")
-            return fuse_pcd, [], []
+            return [], [], []
 
         # Create visualization outputs
         # 1. Save individual grasps meshes
@@ -269,7 +276,7 @@ def get_graspnet_inference (
             # Create a screenshot of the scene with the best grasp
             vis = o3d.visualization.Visualizer()
             vis.create_window(visible=visualize)
-            vis.add_geometry(fuse_pcd)
+            vis.add_geometry(fused_pcd_world)
             vis.add_geometry(coord_frame)
             
             # Add all grasps
@@ -299,7 +306,7 @@ def get_graspnet_inference (
             vis.destroy_window()
         
         # Return both the fuse point cloud, best grasp pose, and best grasp score
-        return fuse_pcd, best_pose, best_score
+        return fused_pcd_world, best_pose, best_score
 
     except Exception as e:
         raise RuntimeError(f"Failed to get graspnet inference: {e}")
@@ -351,7 +358,7 @@ def get_graspnet_inference_on_multiview (
         grasp_candidates = planner.plan_multiview_grasps(
             realsense_inputs=realsense_input_dict,
             detection_results=groundingdino_output_dict,
-            get_visual=visualize  # For debugging
+            get_visual=True  # For debugging
         )
 
         # Save grasp data as JSON
@@ -398,7 +405,7 @@ def get_graspnet_inference_on_multiview (
             
         else:
             rospy.logerr("No valid grasp poses found")
-            return [], [], []
+            return [], [], [], [], [], []
 
         # Create visualization outputs
         # 1. Save individual grasps meshes
@@ -436,30 +443,111 @@ def get_graspnet_inference_on_multiview (
     except Exception as e:
         raise RuntimeError(f"Failed to get graspnet inference: {e}")
 
+# def create_pose_msg(
+#     grasp_pose: np.ndarray, 
+#     frame_id: str = "world"
+#     ) -> geometry_msgs.msg.PoseStamped:
+#     """
+#     Creates a geometry_msgs.msg.PoseStamped object.
+
+#     Args:
+#         grasp_pose: List representation of 6DoF grasp pose
+#         frame_id: Frame reference of the pose
+
+#     Return:
+#         PoseStamped object of the grasp pose
+#     """
+#     if not grasp_pose:
+#         return [] 
+
+#     pose_stamped = geometry_msgs.msg.PoseStamped()
+#     pose_stamped.header.stamp = rospy.Time.now() # Or get time from appropriate source
+#     pose_stamped.header.frame_id = frame_id # Frame this pose is defined in
+#     pose_stamped.pose.position.x = grasp_pose[0]
+#     pose_stamped.pose.position.y = grasp_pose[1]
+#     pose_stamped.pose.position.z = grasp_pose[2]
+
+#     pose_stamped.pose.orientation.x = grasp_pose[3]
+#     pose_stamped.pose.orientation.y = grasp_pose[4]
+#     pose_stamped.pose.orientation.z = grasp_pose[5]
+#     pose_stamped.pose.orientation.w = grasp_pose[6]
+
+#     return pose_stamped
+
 def create_pose_msg(
     grasp_pose: np.ndarray, 
     frame_id: str = "world"
     ) -> geometry_msgs.msg.PoseStamped:
     """
-    Creates a geometry_msgs.msg.PoseStamped object.
+    Creates a geometry_msgs.msg.PoseStamped object from grasp pose.
 
     Args:
-        grasp_pose: List representation of 6DoF grasp pose
+        grasp_pose: Either a 4x4 transformation matrix or 7-element array [x,y,z,qx,qy,qz,qw]
         frame_id: Frame reference of the pose
 
     Return:
         PoseStamped object of the grasp pose
     """
-    pose_stamped = geometry_msgs.msg.PoseStamped()
-    pose_stamped.header.stamp = rospy.Time.now() # Or get time from appropriate source
-    pose_stamped.header.frame_id = frame_id # Frame this pose is defined in
-    pose_stamped.pose.position.x = grasp_pose[0]
-    pose_stamped.pose.position.y = grasp_pose[1]
-    pose_stamped.pose.position.z = grasp_pose[2]
+    # Check if input is valid
+    if grasp_pose is None:
+        rospy.logerr("Grasp pose is None")
+        return None
+    
+    # Handle empty list/array
+    if isinstance(grasp_pose, (list, np.ndarray)) and len(grasp_pose) == 0:
+        rospy.logerr("Grasp pose is empty")
+        return None
 
-    pose_stamped.pose.orientation.x = grasp_pose[3]
-    pose_stamped.pose.orientation.y = grasp_pose[4]
-    pose_stamped.pose.orientation.z = grasp_pose[5]
-    pose_stamped.pose.orientation.w = grasp_pose[6]
+    pose_stamped = geometry_msgs.msg.PoseStamped()
+    pose_stamped.header.stamp = rospy.Time.now()
+    pose_stamped.header.frame_id = frame_id
+    
+    # Handle different input formats
+    if isinstance(grasp_pose, np.ndarray) and grasp_pose.shape == (4, 4):
+        # Input is a 4x4 transformation matrix
+        position = grasp_pose[:3, 3]
+        rotation_matrix = grasp_pose[:3, :3]
+        
+        # Convert rotation matrix to quaternion
+        from scipy.spatial.transform import Rotation as R
+        r = R.from_matrix(rotation_matrix)
+        quat = r.as_quat()  # Returns [x, y, z, w]
+        
+        pose_stamped.pose.position.x = position[0]
+        pose_stamped.pose.position.y = position[1]
+        pose_stamped.pose.position.z = position[2]
+        
+        pose_stamped.pose.orientation.x = quat[0]
+        pose_stamped.pose.orientation.y = quat[1]
+        pose_stamped.pose.orientation.z = quat[2]
+        pose_stamped.pose.orientation.w = quat[3]
+        
+    elif isinstance(grasp_pose, (list, np.ndarray)) and len(grasp_pose) == 7:
+        # Input is [x, y, z, qx, qy, qz, qw]
+        pose_stamped.pose.position.x = float(grasp_pose[0])
+        pose_stamped.pose.position.y = float(grasp_pose[1])
+        pose_stamped.pose.position.z = float(grasp_pose[2])
+        
+        pose_stamped.pose.orientation.x = float(grasp_pose[3])
+        pose_stamped.pose.orientation.y = float(grasp_pose[4])
+        pose_stamped.pose.orientation.z = float(grasp_pose[5])
+        pose_stamped.pose.orientation.w = float(grasp_pose[6])
+        
+    else:
+        rospy.logerr(f"Invalid grasp pose format: {type(grasp_pose)} with shape/length {getattr(grasp_pose, 'shape', len(grasp_pose) if hasattr(grasp_pose, '__len__') else 'N/A')}")
+        return None
+    
+    # Validate quaternion (should be normalized)
+    quat_norm = np.sqrt(pose_stamped.pose.orientation.x**2 + 
+                       pose_stamped.pose.orientation.y**2 + 
+                       pose_stamped.pose.orientation.z**2 + 
+                       pose_stamped.pose.orientation.w**2)
+    
+    if abs(quat_norm - 1.0) > 0.01:  # Allow small numerical errors
+        rospy.logwarn(f"Quaternion not normalized (norm={quat_norm:.4f}). Normalizing...")
+        pose_stamped.pose.orientation.x /= quat_norm
+        pose_stamped.pose.orientation.y /= quat_norm
+        pose_stamped.pose.orientation.z /= quat_norm
+        pose_stamped.pose.orientation.w /= quat_norm
 
     return pose_stamped
