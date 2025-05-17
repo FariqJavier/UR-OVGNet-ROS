@@ -178,33 +178,69 @@ class Graspnet:
             rospy.loginfo(f"Filtered by dist_thresh: kept {np.sum(dist_mask)} grasps.")
 
         if self.angle_thresh is not None:
-            # Apply angle threshold filtering based on approach angle to the object's top surface or gravity direction
-            angle_mask = (rs[:, 2, 0] < -np.cos(self.angle_thresh / 180.0 * np.pi))
+            # Calculate angles between approach direction and vertical (in degrees)
+            approach_angles = np.arccos(-rs[:, 2, 0]) * 180.0 / np.pi
+            angle_mask = approach_angles < self.angle_thresh
             combined_mask &= angle_mask
-            rospy.loginfo(f"Filtered by angle_thresh: kept {np.sum(angle_mask)} grasps.")
+            rospy.loginfo(f"Filtered by angle_thresh (<{self.angle_thresh}°): kept {np.sum(angle_mask)} grasps.")
+            rospy.loginfo(f"Angle range of kept grasps: {np.min(approach_angles[angle_mask]):.1f}° to {np.max(approach_angles[angle_mask]):.1f}°")
 
         if top_down_only:
             # Stricter filtering for top-down grasps (approach from above)
-            top_down_angle_thresh = self.angle_thresh  # degrees (adjust as needed)
+            top_down_angle_thresh = min(self.angle_thresh, 45) # degrees (adjust as needed)
             approach_vectors = rs[:, :, 0]  # Approach direction in graspnet frame
-            approach_from_above_mask = approach_vectors[:, 2] < -0.8  # z-component should be negative
+            # Calculate the angle between approach vector and negative Z-axis (in degrees)
+            # A perfect top-down grasp would have angle = 0
+            # approach_from_above_mask = approach_vectors[:, 2] < -0.8  # z-component should be negative
+            approach_angles = np.arccos(-approach_vectors[:, 2]) * 180.0 / np.pi
+            approach_from_above_mask = approach_angles < top_down_angle_thresh
             combined_mask &= approach_from_above_mask
             rospy.loginfo(f"Filtered for top-down approach: kept {np.sum(approach_from_above_mask)} grasps.")
 
             if np.sum(combined_mask) < 1:
                 rospy.logwarn("No top-down grasps found. Using best available grasps...")
                 # Fall back to best angle grasps
-                angles = np.arccos(-rs[:, 2, 0]) * 180.0 / np.pi
-                sorted_indices = np.argsort(angles)
+                # angles = np.arccos(-rs[:, 2, 0]) * 180.0 / np.pi
+                # sorted_indices = np.argsort(angles)
+                sorted_indices = np.argsort(approach_angles)
                 num_grasps = min(10, len(gg))
                 filtered_gg = gg[sorted_indices[:num_grasps]]
                 return filtered_gg, eelink_rs[sorted_indices[:num_grasps]]
             else:
+                # # Use grasps that pass all the filters
+                # filtered_gg = gg[combined_mask]
+                # sorted_indices = np.argsort(-scores[combined_mask])
+                # num_grasps = min(20, len(filtered_gg))
+                # filtered_gg = filtered_gg[sorted_indices[:num_grasps]]
+                # return filtered_gg, eelink_rs[combined_mask][sorted_indices[:num_grasps]]
+                
                 # Use grasps that pass all the filters
                 filtered_gg = gg[combined_mask]
-                sorted_indices = np.argsort(-scores[combined_mask])
+                
+                # Calculate combined scores that prioritize top-down grasps
+                top_down_scores = 1.0 - (approach_angles[combined_mask] / top_down_angle_thresh)
+                
+                # Weight between original grasp score and top-down score
+                # Adjust these weights to balance grasp quality vs. top-down preference
+                original_weight = 0.3
+                top_down_weight = 0.7
+                
+                # Calculate combined scores (higher is better)
+                combined_scores = (original_weight * scores[combined_mask]) + \
+                                (top_down_weight * top_down_scores)
+                
+                # Sort by combined score
+                sorted_indices = np.argsort(-combined_scores)
                 num_grasps = min(20, len(filtered_gg))
                 filtered_gg = filtered_gg[sorted_indices[:num_grasps]]
+                
+                # Log the selected grasps for debugging
+                rospy.loginfo(f"Selected {len(filtered_gg)} grasps with top-down priority")
+                if len(filtered_gg) > 0:
+                    best_angle = approach_angles[combined_mask][sorted_indices[0]]
+                    best_score = scores[combined_mask][sorted_indices[0]]
+                    rospy.loginfo(f"Best grasp: angle = {best_angle:.2f}°, original score = {best_score:.2f}")
+                
                 return filtered_gg, eelink_rs[combined_mask][sorted_indices[:num_grasps]]
         else:
             # For taller objects, allow side grasps but prefer grasps on the object body, not edges
