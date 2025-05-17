@@ -2,6 +2,7 @@ import numpy as np
 import open3d as o3d
 import open3d_plus as o3dp
 from scipy.spatial.transform import Rotation as R
+from sklearn.preprocessing import MinMaxScaler
 import copy
 import os
 import sys
@@ -183,7 +184,10 @@ class Graspnet:
             angle_mask = approach_angles < self.angle_thresh
             combined_mask &= angle_mask
             rospy.loginfo(f"Filtered by angle_thresh (<{self.angle_thresh}°): kept {np.sum(angle_mask)} grasps.")
-            rospy.loginfo(f"Angle range of kept grasps: {np.min(approach_angles[angle_mask]):.1f}° to {np.max(approach_angles[angle_mask]):.1f}°")
+            if np.sum(angle_mask) > 0:  # Only try to get min/max if we have values
+                rospy.loginfo(f"Angle range of kept grasps: {np.min(approach_angles[angle_mask]):.1f}° to {np.max(approach_angles[angle_mask]):.1f}°")
+            else:
+                rospy.loginfo("No grasps within the angle threshold.")
 
         if top_down_only:
             # Stricter filtering for top-down grasps (approach from above)
@@ -213,7 +217,7 @@ class Graspnet:
                 # num_grasps = min(20, len(filtered_gg))
                 # filtered_gg = filtered_gg[sorted_indices[:num_grasps]]
                 # return filtered_gg, eelink_rs[combined_mask][sorted_indices[:num_grasps]]
-                
+
                 # Use grasps that pass all the filters
                 filtered_gg = gg[combined_mask]
                 
@@ -293,6 +297,33 @@ class Graspnet:
             grasp_poses.append(grasp_pose)
         
         return grasp_poses, geometries, scores
+
+    def color_grasp_poses_by_score(self, geometries, scores):
+        """
+        Color grasp poses by their score. The higher the score, the greener the color.
+
+        Args:
+            geometries: List of Open3D geometries representing the grasp poses
+            scores: List of grasp scores corresponding to each grasp pose
+
+        Returns:
+            geometries: List of Open3D geometries with updated colors
+        """
+        # Normalize the scores to range [0, 1] using MinMaxScaler
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        normalized_scores = scaler.fit_transform(np.array(scores).reshape(-1, 1)).flatten()
+
+        # Map normalized scores to a color map (e.g., green to red color map)
+        for i, geometry in enumerate(geometries):
+            score = normalized_scores[i]
+            
+            # Map score to a color using a simple linear gradient from red (low) to green (high)
+            color = np.array([1.0 - score, score, 0.0])  # [R, G, B]
+            
+            # Apply color to the geometry
+            geometry.paint_uniform_color(color)
+
+        return geometries
     
     def grasp_detection_real_world(self, fused_pcd_world, fused_pcd_canonical, world_to_canonical_transform, get_visual, min_score=0.15, top_down_only=True):
         """
@@ -369,12 +400,108 @@ class Graspnet:
             
             # Optional visualization
             if get_visual:  # Set to True for debugging
+                # Color the grasp poses by score
+                geometries_canonical = self.color_grasp_poses_by_score(geometries_canonical, scores_canonical)
+                geometries_world = self.color_grasp_poses_by_score(geometries_world, scores_world)
                 # Visualize the canonical based grasp poses
                 frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
-                o3d.visualization.draw_geometries([frame, fused_pcd_canonical] + geometries_canonical)
+                o3d.visualization.draw_geometries([frame, fused_pcd_canonical] + geometries_canonical, f'Canonical Grasp Poses')
                 # Visualize the world based grasp poses
                 frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
-                o3d.visualization.draw_geometries([frame, fused_pcd_world] + geometries_world)
+                o3d.visualization.draw_geometries([frame, fused_pcd_world] + geometries_world, f'World Grasp Poses')
+                
+            return grasp_poses_world, geometries_world, scores_world
+            
+        except Exception as e:
+            rospy.logerr(f"Error in grasp detection: {e}")
+            import traceback
+            rospy.logerr(traceback.format_exc())
+            return [], [], []
+
+    def grasp_detection_real_world_multiview(self, fused_pcd_world, fused_pcd_canonical, world_to_canonical_transform, get_visual, camera_id, min_score=0.15, top_down_only=True):
+        """
+        Generate grasping poses for a real-world setting without known object poses.
+        
+        Args:
+            full_pcd: Open3D point cloud of the scene
+            min_score: Minimum score threshold for grasp filtering
+            
+        Returns:
+            list, list: List of grasp poses (position + quaternion), and visualization geometries
+        """
+        try:
+            # Check if the point cloud is valid
+            if fused_pcd_canonical is None or len(fused_pcd_canonical.points) < 10:
+                rospy.logwarn("Invalid or empty point cloud for grasp detection")
+                return [], [], []
+            
+            # Compute grasp candidates
+            rospy.loginfo(f"Computing grasp poses on point cloud with {len(fused_pcd_canonical.points)} points")
+            gg = self.compute_grasp_pose(fused_pcd_canonical)
+            
+            # Log number of grasps found
+            rospy.loginfo(f"Found {len(gg)} grasp candidates before filtering")
+            
+            if len(gg) == 0:
+                rospy.logwarn("No grasp candidates found")
+                return [], [], []
+            
+            # Filter grasps by score and angle
+            # filtered_gg, eelink_rs = self.filter_grasps_by_score_and_angle(gg, min_score, top_down_only)
+            filtered_gg, eelink_rs = self.filter_grasps_pose(gg, min_score, top_down_only)
+            
+            # Log number of grasps after filtering
+            rospy.loginfo(f"Filtered to {len(filtered_gg)} grasp candidates")
+            
+            if len(filtered_gg) == 0:
+                rospy.logwarn("No grasp candidates remain after filtering")
+                return [], [], []
+            
+            # Convert to grasp poses
+            grasp_poses_canonical, geometries_canonical, scores_canonical = self.convert_grasps_to_poses(filtered_gg, eelink_rs)
+
+            # Transform grasps back to world coordinates
+            canonical_to_world_transform = np.linalg.inv(world_to_canonical_transform)
+            grasp_poses_world = []
+            geometries_world = []
+            scores_world = []
+
+            for grasp_pose_canonical, geometry_canonical, score_canonical in zip(grasp_poses_canonical, geometries_canonical, scores_canonical):
+                # Split the canonical grasp pose into position and quaternion (rotation)
+                position_canonical = grasp_pose_canonical[:3]
+                quaternion_canonical = grasp_pose_canonical[3:]
+
+                # Apply the transformation to the position
+                position_world = canonical_to_world_transform[:3, :3] @ position_canonical + canonical_to_world_transform[:3, 3]
+
+                # Apply the transformation to the quaternion (rotation)
+                rotation_matrix = R.from_quat(quaternion_canonical).as_matrix()
+                rotation_world = canonical_to_world_transform[:3, :3] @ rotation_matrix
+
+                # Convert the rotation matrix back to a quaternion
+                quaternion_world = R.from_matrix(rotation_world).as_quat()
+
+                # Create the final grasp pose in world coordinates
+                grasp_pose_world = np.concatenate([position_world, quaternion_world])
+
+                geometry_world = copy.deepcopy(geometry_canonical)
+                geometry_world.transform(canonical_to_world_transform)
+
+                grasp_poses_world.append(grasp_pose_world)
+                geometries_world.append(geometry_world)
+                scores_world.append(score_canonical)
+            
+            # Optional visualization
+            if get_visual:  # Set to True for debugging
+                # Color the grasp poses by score
+                geometries_canonical = self.color_grasp_poses_by_score(geometries_canonical, scores_canonical)
+                geometries_world = self.color_grasp_poses_by_score(geometries_world, scores_world)
+                # Visualize the canonical based grasp poses
+                frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
+                o3d.visualization.draw_geometries([frame, fused_pcd_canonical] + geometries_canonical, f'Camera {camera_id} - Canonical Grasp Poses')
+                # Visualize the world based grasp poses
+                frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
+                o3d.visualization.draw_geometries([frame, fused_pcd_world] + geometries_world, f'Camera {camera_id} - World Grasp Poses')
                 
             return grasp_poses_world, geometries_world, scores_world
             
