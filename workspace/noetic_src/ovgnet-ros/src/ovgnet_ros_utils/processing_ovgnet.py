@@ -23,10 +23,11 @@ from realsense_ros_utils.saving_image import (
 )
 
 from graspnet_ros_utils.grasp_detector import Graspnet
-from graspnet_ros_utils.multiview_grasp_planner import MultiViewGraspPlanner
 from graspnet_ros_utils.processing_graspnet import (
     get_fuse_pointcloud,
-    get_single_pointcloud
+    get_single_pointcloud,
+    get_best_grasp_score,
+    get_pcd_world_by_camera_id
 )
 
 def get_realsense_input (
@@ -196,11 +197,11 @@ def get_graspnet_inference (
         # o3d.visualization.draw_geometries([fuse_pcd])
 
         # Save the fused point cloud to a file
-        fused_pcd_world_path = os.path.join(output_dir, f"fused_point_cloud__world_{str(frame_id)}.pcd")
+        fused_pcd_world_path = os.path.join(output_dir, f"fused_point_cloud__world.pcd")
         o3d.io.write_point_cloud(fused_pcd_world_path, fused_pcd_world)
         rospy.loginfo(f"Fused point cloud saved to: {fused_pcd_world_path}")
 
-        fused_pcd_canonical_path = os.path.join(output_dir, f"fused_point_cloud_canonical_{str(frame_id)}.pcd")
+        fused_pcd_canonical_path = os.path.join(output_dir, f"fused_point_cloud_canonical.pcd")
         o3d.io.write_point_cloud(fused_pcd_canonical_path, fused_pcd_canonical)
         rospy.loginfo(f"Fused point cloud saved to: {fused_pcd_canonical_path}")
 
@@ -223,7 +224,7 @@ def get_graspnet_inference (
                 "score": float(score)
             })
         
-        with open(os.path.join(output_dir, f"grasp_data_{str(frame_id)}.json"), 'w') as f:
+        with open(os.path.join(output_dir, f"grasp_data.json"), 'w') as f:
             json.dump(grasp_data, f, indent=2)
 
         # Log grasp results
@@ -231,20 +232,20 @@ def get_graspnet_inference (
             rospy.loginfo(f"Found {len(grasp_poses)} valid grasps")
             best_score = scores[0]
             best_pose = grasp_poses[0]
-            # rospy.loginfo(f"Best grasp score: {best_score:.4f}")
-            # rospy.loginfo(f"Best grasp position: [{best_pose[0]:.4f}, {best_pose[1]:.4f}, {best_pose[2]:.4f}]")
+            rospy.loginfo(f"Best grasp score: {best_score:.4f}")
+            rospy.loginfo(f"Best grasp position: [{best_pose[0]:.4f}, {best_pose[1]:.4f}, {best_pose[2]:.4f}]")
         else:
             rospy.logerr("No valid grasp poses found")
             return [], [], []
 
         # Create visualization outputs
-        # 1. Save individual grasps meshes
-        grasp_dir = os.path.join(output_dir, f"grasps_{str(frame_id)}")
-        os.makedirs(grasp_dir, exist_ok=True)
+        # # 1. Save individual grasps meshes
+        # grasp_dir = os.path.join(output_dir, f"grasps_{str(frame_id)}")
+        # os.makedirs(grasp_dir, exist_ok=True)
         
-        for i, geom in enumerate(geometries):
-            grasp_path = os.path.join(grasp_dir, f"grasp_{i}_score_{scores[i]:.4f}.ply")
-            o3d.io.write_triangle_mesh(grasp_path, geom)
+        # for i, geom in enumerate(geometries):
+        #     grasp_path = os.path.join(grasp_dir, f"grasp_{i}_score_{scores[i]:.4f}.ply")
+        #     o3d.io.write_triangle_mesh(grasp_path, geom)
         
         # 2. Save combined grasp visualization
         coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
@@ -264,7 +265,7 @@ def get_graspnet_inference (
             combined_grasps += geom
         
         # Save combined grasps
-        combined_path = os.path.join(output_dir, f"combined_grasps_{str(frame_id)}.ply")
+        combined_path = os.path.join(output_dir, f"combined_grasps.ply")
         o3d.io.write_triangle_mesh(combined_path, combined_grasps)
         rospy.loginfo(f"Saved combined grasps to {combined_path}")
         
@@ -294,7 +295,7 @@ def get_graspnet_inference (
             vis.update_renderer()
             
             # Save image
-            image_path = os.path.join(output_dir, f"grasp_scene_{str(frame_id)}.png")
+            image_path = os.path.join(output_dir, f"grasp_scene.png")
             vis.capture_screen_image(image_path)
             rospy.loginfo(f"Saved visualization image to {image_path}")
             
@@ -351,95 +352,139 @@ def get_graspnet_inference_on_multiview (
             mask_thresh=mask_thresh
         )
 
-        # Initialize the multi-view planner
-        planner = MultiViewGraspPlanner(graspnet, robot_base_frame='base_link')
-
-        # Generate grasps from multiple views
-        grasp_candidates = planner.plan_multiview_grasps(
-            realsense_inputs=realsense_input_dict,
-            detection_results=groundingdino_output_dict,
-            get_visual=True  # For debugging
-        )
-
-        # Save grasp data as JSON
         grasp_data = []
-        for i, grasp in enumerate(grasp_candidates):
-            pose_matrix = grasp.pose  # This is a 4x4 matrix
-            
-            # Extract translation
-            position = pose_matrix[:3, 3]
 
-            # Extract rotation matrix and convert to quaternion
-            rotation = pose_matrix[:3, :3]
-            quat = R.from_matrix(rotation).as_quat()  # returns [x, y, z, w]
+        # Process each camera view
+        for camera_id, realsense_input in realsense_input_dict.items():
+            if camera_id not in groundingdino_output_dict:
+                rospy.logwarn(f"No detection result for camera {camera_id}")
+                continue
 
-            grasp_data.append({
-                "id": i,
-                "position": position.tolist(),
-                "orientation": quat.tolist(),
-                "score": float(grasp.score),
-                "confidence": float(grasp.confidence),
-                "distance_to_robot": float(grasp.distance_to_robot),
-                "view_angle": float(grasp.view_angle),
-                "reachability_score": float(grasp.reachability_score)
-            })
-        
-        with open(os.path.join(output_dir, f"grasp_data_{str(frame_id)}.json"), 'w') as f:
-            json.dump(grasp_data, f, indent=2)
+            # Get pointcloud from input image
+            pcd_world, pcd_canonical, trans_world, trans_canonical = get_single_pointcloud(
+                realsense_input=realsense_input,
+                groundingdino_output=groundingdino_output_dict[camera_id],
+                camera_id=camera_id
+            )
 
-        # Log grasp results
-        if len(grasp_candidates) > 0:
-            rospy.loginfo(f"Found {len(grasp_candidates)} valid grasps")
-            best_pose = grasp_candidates[0]
-            best_score = grasp_candidates[0].score
-            best_confidence = grasp_candidates[0].confidence
-            best_distance_to_robot = grasp_candidates[0].distance_to_robot
-            best_view_angle = grasp_candidates[0].view_angle
-            best_reachability_score = grasp_candidates[0].reachability_score
-            # rospy.loginfo(f"Best grasp score: {best_score:.4f}")
-            # rospy.loginfo(f"Best grasp position: [{best_pose[0]:.4f}, {best_pose[1]:.4f}, {best_pose[2]:.4f}]")
-            # rospy.loginfo(f"Best grasp Confidence: {best_confidence:.3f}")
-            # rospy.loginfo(f"Best grasp Distance: {best_distance:.3f} m")
-            # rospy.loginfo(f"Best grasp  View angle: {best_angle:.1f} degrees")
-            # rospy.loginfo(f"Best grasp  Reachability: {best_reachability_score:.1f}")
-            
+            # Save the fused point cloud to a file
+            pcd_world_path = os.path.join(output_dir, f"point_cloud__world_{str(camera_id)}.pcd")
+            o3d.io.write_point_cloud(pcd_world_path, pcd_world)
+            rospy.loginfo(f"Camera {camera_id} - Fused point cloud saved to: {pcd_world_path}")
+
+            pcd_canonical_path = os.path.join(output_dir, f"point_cloud_canonical_{str(camera_id)}.pcd")
+            o3d.io.write_point_cloud(pcd_canonical_path, pcd_canonical)
+            rospy.loginfo(f"Camera {camera_id} - Fused point cloud saved to: {pcd_canonical_path}")
+
+            # Generate grasp pose from graspnet
+            grasp_poses, geometries, scores = graspnet.grasp_detection_real_world_multiview(
+                pcd_world,
+                pcd_canonical, 
+                trans_canonical,
+                get_visual=True, 
+                camera_id=camera_id,
+                top_down_only=True
+            )
+
+            # Log grasp results
+            if len(grasp_poses) > 0:
+                rospy.loginfo(f"Camera {camera_id} - Found {len(grasp_poses)} valid grasps")
+                best_score = scores[0]
+                best_pose = grasp_poses[0]
+                best_geometry = geometries[0]
+                rospy.loginfo(f"Camera {camera_id} - Best grasp score: {best_score:.4f}")
+                rospy.loginfo(f"Camera {camera_id} - Best grasp position: [{best_pose[0]:.4f}, {best_pose[1]:.4f}, {best_pose[2]:.4f}]")
+                grasp_data.append({
+                    "camera_id": camera_id,
+                    "pcd_world": pcd_world,
+                    "grasp_poses": grasp_poses,
+                    "geometries": geometries,
+                    "scores": scores
+                })
+            else:
+                rospy.logerr(f"Camera {camera_id} - No valid grasp poses found")
+                continue
+
+        # Check if we found any valid grasps
+        if len(grasp_data) == 0:
+            rospy.logwarn("No valid grasp poses found from any camera")
+            return [], [], []
+
+        rospy.loginfo(f"Finding best grasp from all cameras...")
+
+        final_camera_id, final_best_grasp, final_best_score, final_best_geometry = get_best_grasp_score(grasp_data)
+        if final_camera_id is not None and final_best_grasp is not None:
+            rospy.loginfo(f"Best Grasp from Camera {final_camera_id} with Score: {final_best_score:.4f}")
+            rospy.loginfo(f"Best Grasp Pose: {final_best_grasp}")
         else:
-            rospy.logerr("No valid grasp poses found")
-            return [], [], [], [], [], []
+            rospy.loginfo("No valid grasps found.")  
+            return [], [], []
 
-        # Create visualization outputs
-        # 1. Save individual grasps meshes
-        grasp_dir = os.path.join(output_dir, f"grasps_{str(frame_id)}")
-        os.makedirs(grasp_dir, exist_ok=True)
-        
-        for i, g in enumerate(grasp_candidates):
-            grasp_path = os.path.join(grasp_dir, f"grasp_{i}_score_{g.score:.4f}.ply")
-            o3d.io.write_triangle_mesh(grasp_path, g.geometry)
+        try:
+            # Save grasp data as JSON - handle non-serializable objects
+            grasp_data_json = []
+            for data in grasp_data:
+                # Create a new dictionary with only JSON-serializable data
+                json_data = {
+                    "camera_id": data["camera_id"],
+                    # Convert grasp poses from numpy arrays to lists
+                    "grasp_poses": [pose.tolist() if isinstance(pose, np.ndarray) else list(pose) for pose in data["grasp_poses"]],
+                    # Convert scores to simple floats
+                    "scores": [float(score) for score in data["scores"]]
+                    # Do NOT include point clouds or Open3D geometries
+                }
+                grasp_data_json.append(json_data)
+                
+            with open(os.path.join(output_dir, f"grasp_data.json"), 'w') as f:
+                json.dump(grasp_data_json, f, indent=2)
+        except Exception as e:
+            rospy.logwarn(f"Failed to save grasp data as JSON: {e}")
 
-            # Normalize score to 0-1
-            normalized_score = g.score[i]
-            # Create color mapping (red to green based on score)
-            color = np.array([1.0 - normalized_score, normalized_score, 0.0])
-            # Apply color to the mesh
-            g.geometry.paint_uniform_color(color)
-
+        final_pcd_world = get_pcd_world_by_camera_id(grasp_data, final_camera_id)
+        if final_pcd_world is None:
+            rospy.logwarn(f"Could not find point cloud for camera {final_camera_id}")
+            return None, final_best_grasp, final_best_score
+            
+        if final_best_geometry is not None:
+            final_best_geometry.paint_uniform_color([0.0, 0.5, 1.0])  # Blue for best grasp
         
-        # 2. Save combined grasp visualization
-        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+        # Create a screenshot of the scene with the best grasp
+        try:
+            coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+            vis = o3d.visualization.Visualizer()
+            vis.create_window(visible=visualize)
+            vis.add_geometry(final_pcd_world)
+            vis.add_geometry(coord_frame)
+            
+            if final_best_geometry is not None:
+                vis.add_geometry(final_best_geometry)
+                
+            # Set view
+            view_control = vis.get_view_control()
+            view_control.set_front([0, 0, 1])  # View from front
+            view_control.set_up([0, 1, 0])     # Up direction
+            view_control.set_zoom(0.7)
+            
+            # Update visualization and capture the image
+            vis.poll_events()
+            vis.update_renderer()
+            
+            # Save image
+            image_path = os.path.join(output_dir, f"best_grasp_scene_{str(final_camera_id)}.png")
+            vis.capture_screen_image(image_path)
+            rospy.loginfo(f"Saved visualization image to {image_path}")
+            
+            # If visualize is True, show the window
+            if visualize:
+                rospy.loginfo("Showing visualization window. Close the window to continue.")
+                vis.run()
+            
+            vis.destroy_window()
+        except Exception as e:
+            rospy.logwarn(f"Visualization failed: {e}")
         
-        # Combine all grasp geometries into one mesh
-        combined_grasps = o3d.geometry.TriangleMesh()
-        for grasp in grasp_candidates:
-            combined_grasps += grasp.geometry
-        
-        # Save combined grasps
-        combined_path = os.path.join(output_dir, f"combined_grasps_{str(frame_id)}.ply")
-        o3d.io.write_triangle_mesh(combined_path, combined_grasps)
-        rospy.loginfo(f"Saved combined grasps to {combined_path}")
-        
-        # Return both the best grasp pose with its score, confidence, distance, view angle, and reachability score
-        return best_pose, best_score, best_confidence, best_distance_to_robot, best_view_angle, best_reachability_score
-
+        # Return both the fuse point cloud, best grasp pose, and best grasp score
+        return [], final_best_grasp, final_best_score
     except Exception as e:
         raise RuntimeError(f"Failed to get graspnet inference: {e}")
 
