@@ -14,19 +14,29 @@ from scipy.spatial.distance import cdist
 import random
 import rospy
 import copy
+import tf2_ros
 
 reconstruction_config = {
-    'nb_neighbors': 50,
-    'std_ratio': 2.0,
-    'voxel_size': 0.0015,
-    'icp_max_try': 5,
-    'icp_max_iter': 2000,
-    'translation_thresh': 3.95,
-    'rotation_thresh': 0.02,
-    'max_correspondence_distance': 0.02,
-    'use_poisson': False,
-    'orient_for_grasping': True,  # Enable orientation correction
-    'debug_orientation': False    # Set to True to visualize orientation
+    'nb_neighbors': 60,        # Increased from 50
+    'std_ratio': 1.5,          # Decreased from 2.0
+    'voxel_size': 0.005,       # Keep as is
+    'icp_max_try': 5,          # Keep as is
+    'icp_max_iter': 2000,      # Keep as is
+    'translation_thresh': 3.95, # Keep as is
+    'rotation_thresh': 0.02,    # Keep as is
+    'max_correspondence_distance': 0.015, # Decreased from 0.02
+    'use_poisson': False,      # Consider changing to True for smoother results
+    'dbscan_eps': 0.02,       # Add this parameter (smaller for tighter clustering)
+    'dbscan_min_points': 10,   # Add this parameter (higher for more strict clustering)
+    'orient_for_grasping': True,
+    'debug_orientation': False,
+    # New parameters for table alignment
+    'plane_distance_threshold': 0.01,   # Distance threshold for plane detection
+    'visualize_alignment': False,       # Set to True for debugging
+    'visualize_final': True,           # Set to True for debugging
+    'min_object_height': 0.005,         # Min height above table
+    'max_object_height': 0.5,           # Max height above table
+    'final_voxel_size': 0.002           # Final voxel size for downsampling
 }
 
 graspnet_config = {
@@ -36,68 +46,6 @@ graspnet_config = {
     'angle_thresh': 15,
     'mask_thresh': 0.5
 }
-
-def compute_scaling_factor(camera_info, box_filter):
-    # Example: Use camera intrinsic parameters to compute scaling factor
-    intrinsic_matrix = np.array(camera_info["intrinsic_matrix"]).reshape(3, 3)
-    f_x = intrinsic_matrix[0, 0]  # Focal length in x-direction
-    f_y = intrinsic_matrix[1, 1]  # Focal length in y-direction
-    
-    # For simplicity, assume a known object at a fixed distance from the camera
-    object_distance = 0.5  # In meters (for example)
-    
-    # Use depth image and intrinsics to compute real-world scaling factor
-    # Convert bounding box to real-world units (meters) at a known depth
-    x_min, x_max, y_min, y_max = box_filter
-    real_world_width = (x_max - x_min) * object_distance / f_x
-    real_world_height = (y_max - y_min) * object_distance / f_y
-
-    # Compute scaling factor based on known real-world size
-    scaling_factor_x = real_world_width / (x_max - x_min)
-    scaling_factor_y = real_world_height / (y_max - y_min)
-    
-    rospy.loginfo(f"Computed scaling factor: {scaling_factor_x}, {scaling_factor_y}")
-    return scaling_factor_x, scaling_factor_y
-
-def get_heightmap(points, colors, bounds, pixel_size):
-    """Get top-down (z-axis) orthographic heightmap image from 3D pointcloud.
-
-    Args:
-        points: HxWx3 float array of 3D points in world coordinates.
-        colors: HxWx3 uint8 array of values in range 0-255 aligned with points.
-        bounds: 3x2 float array of values (rows: X,Y,Z; columns: min,max) defining
-            region in 3D space to generate heightmap in world coordinates.
-        pixel_size: float defining size of each pixel in meters.
-    Returns:
-        heightmap: HxW float array of height (from lower z-bound) in meters.
-        colormap: HxWx3 uint8 array of backprojected color aligned with heightmap.
-    """
-    width = int(np.round((bounds[0, 1] - bounds[0, 0]) / pixel_size))
-    height = int(np.round((bounds[1, 1] - bounds[1, 0]) / pixel_size))
-    heightmap = np.zeros((height, width), dtype=np.float32)
-    colormap = np.zeros((height, width, colors.shape[-1]), dtype=np.uint8)
-
-    # Filter out 3D points that are outside of the predefined bounds.
-    ix = (points[Ellipsis, 0] >= bounds[0, 0]) & (points[Ellipsis, 0] < bounds[0, 1])
-    iy = (points[Ellipsis, 1] >= bounds[1, 0]) & (points[Ellipsis, 1] < bounds[1, 1])
-    iz = (points[Ellipsis, 2] >= bounds[2, 0]) & (points[Ellipsis, 2] < bounds[2, 1])
-    valid = ix & iy & iz
-    points = points[valid]
-    colors = colors[valid]
-
-    # Sort 3D points by z-value, which works with array assignment to simulate
-    # z-buffering for rendering the heightmap image.
-    iz = np.argsort(points[:, -1])
-    points, colors = points[iz], colors[iz]
-    px = np.int32(np.floor((points[:, 0] - bounds[0, 0]) / pixel_size))
-    py = np.int32(np.floor((points[:, 1] - bounds[1, 0]) / pixel_size))
-    px = np.clip(px, 0, width - 1)
-    py = np.clip(py, 0, height - 1)
-    heightmap[px, py] = points[:, 2] - bounds[2, 0]
-    for c in range(colors.shape[-1]):
-        colormap[px, py, c] = colors[:, c]
-    return heightmap, colormap
-
 
 def get_pointcloud(depth, intrinsics):
     """Get 3D pointcloud from perspective depth image.
@@ -130,84 +78,6 @@ def transform_pointcloud(points, transform):
     for i in range(3):
         points[Ellipsis, i] = np.sum(transform[i, :] * homogen_points, axis=-1)
     return points
-
-
-def reconstruct_heightmaps(color, depth, configs, bounds, pixel_size):
-    """Reconstruct top-down heightmap views from multiple 3D pointclouds."""
-    heightmaps, colormaps = [], []
-    for color, depth, config in zip(color, depth, configs):
-        intrinsics = config["intrinsics"]
-        xyz = get_pointcloud(depth, intrinsics)#深度图像加内参得到点云文件
-        position = np.array(config["position"]).reshape(3, 1)
-        rotation = p.getMatrixFromQuaternion(config["rotation"])
-        rotation = np.array(rotation).reshape(3, 3)
-        transform = np.eye(4)#创建对角矩阵
-        transform[:3, :] = np.hstack((rotation, position))
-        xyz = transform_pointcloud(xyz, transform)
-        heightmap, colormap = get_heightmap(xyz, color, bounds, pixel_size)
-        heightmaps.append(heightmap)
-        colormaps.append(colormap)
-
-    return heightmaps, colormaps
-
-
-def get_fuse_heightmaps(obs, configs, bounds, pixel_size):
-    """Reconstruct orthographic heightmaps with segmentation masks."""
-    heightmaps, colormaps = reconstruct_heightmaps(
-        obs["color"], obs["depth"], configs, bounds, pixel_size
-    )
-    colormaps = np.float32(colormaps)
-    heightmaps = np.float32(heightmaps)
-
-    # Fuse maps from different views.
-    valid = np.sum(colormaps, axis=3) > 0
-    repeat = np.sum(valid, axis=0)
-    repeat[repeat == 0] = 1
-    cmap = np.sum(colormaps, axis=0) / repeat[Ellipsis, None]
-    cmap = np.uint8(np.round(cmap))
-    hmap = np.max(heightmaps, axis=0)  # Max to handle occlusions.
-
-    return cmap, hmap
-
-
-def get_true_heightmap(env):
-    """Get RGB-D orthographic heightmaps and segmentation masks in simulation."""
-
-    # Capture near-orthographic RGB-D images and segmentation masks.
-    color, depth, segm = env.render_camera(env.oracle_cams[0])
-    # print(env.oracle_cams[0])
-
-    # Combine color with masks for faster processing.
-    color = np.concatenate((color, segm[Ellipsis, None]), axis=2)
-
-    # Reconstruct real orthographic projection from point clouds.
-    hmaps, cmaps = reconstruct_heightmaps(
-        [color], [depth], env.oracle_cams, env.bounds, env.pixel_size
-    )
-
-    # Split color back into color and masks.
-    cmap = np.uint8(cmaps)[0, Ellipsis, :3]
-    hmap = np.float32(hmaps)[0, Ellipsis]
-    mask = np.int32(cmaps)[0, Ellipsis, 3:].squeeze()
-
-    return cmap, hmap, mask
-
-
-def get_heightmap_from_real_image(color, depth, segm, env):
-    # Combine color with masks for faster processing.
-    color = np.concatenate((color, segm[Ellipsis, None]), axis=2)
-
-    # Reconstruct real orthographic projection from point clouds.
-    hmaps, cmaps = reconstruct_heightmaps(
-        [color], [depth], env.camera.configs, env.bounds, env.pixel_size
-    )
-
-    # Split color back into color and masks.
-    cmap = np.uint8(cmaps)[0, Ellipsis, :3]
-    hmap = np.float32(hmaps)[0, Ellipsis]
-    mask = np.uint8(cmaps)[0, Ellipsis, 3:].squeeze()
-
-    return cmap, hmap, mask
 
 # Helper function to create rotation matrices
 def get_rotation_matrix(rx, ry, rz):
@@ -250,47 +120,6 @@ def get_rotation_matrix(rx, ry, rz):
     
     return transform
 
-# def process_pcds(pcds, reconstruction_config):
-#     trans = dict()
-#     pcd = pcds[0]
-#     pcd.estimate_normals()
-#     pcd, _ = pcd.remove_statistical_outlier(
-#         nb_neighbors = reconstruction_config['nb_neighbors'],
-#         std_ratio = reconstruction_config['std_ratio']
-#     )
-#     for i in range(1, len(pcds)):
-#         voxel_size = reconstruction_config['voxel_size']
-#         income_pcd, _ = pcds[i].remove_statistical_outlier(
-#             nb_neighbors = reconstruction_config['nb_neighbors'],
-#             std_ratio = reconstruction_config['std_ratio']
-#         )
-#         income_pcd.estimate_normals()
-#         income_pcd = income_pcd.voxel_down_sample(voxel_size)
-#         transok_flag = False
-#         for _ in range(reconstruction_config['icp_max_try']): # try 5 times max
-#             reg_p2p = o3d.pipelines.registration.registration_icp(
-#                 income_pcd,
-#                 pcd,
-#                 reconstruction_config['max_correspondence_distance'],
-#                 np.eye(4, dtype = np.float),
-#                 o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-#                 o3d.pipelines.registration.ICPConvergenceCriteria(reconstruction_config['icp_max_iter'])
-#             )
-#             if (np.trace(reg_p2p.transformation) > reconstruction_config['translation_thresh']) \
-#                 and (np.linalg.norm(reg_p2p.transformation[:3, 3]) < reconstruction_config['rotation_thresh']):
-#                 # trace for transformation matrix should be larger than 3.5
-#                 # translation should less than 0.05
-#                 transok_flag = True
-#                 break
-#         if not transok_flag:
-#             reg_p2p.transformation = np.eye(4, dtype = np.float32)
-#         income_pcd = income_pcd.transform(reg_p2p.transformation)
-#         trans[i] = reg_p2p.transformation
-#         pcd = o3dp.merge_pcds([pcd, income_pcd])
-#         pcd = pcd.voxel_down_sample(voxel_size)
-#         pcd.estimate_normals()
-#     return trans, pcd
-
 def process_pcds(pcds, reconstruction_config):
     """
     Advanced point cloud fusion with global registration and fine-tuning.
@@ -304,19 +133,12 @@ def process_pcds(pcds, reconstruction_config):
     """
     if len(pcds) <= 1:
         return {0: np.eye(4)}, pcds[0] if pcds else None
-    
+
     # Clean and prepare all point clouds
     processed_pcds = []
     for i, pcd in enumerate(pcds):
         # Make a copy to avoid modifying the original
         pcd_copy = copy.deepcopy(pcd)
-        
-        # Remove outliers
-        if len(pcd_copy.points) > 100:
-            pcd_copy, _ = pcd_copy.remove_statistical_outlier(
-                nb_neighbors=reconstruction_config.get('nb_neighbors', 20),
-                std_ratio=reconstruction_config.get('std_ratio', 2.0)
-            )
         
         # Apply DBSCAN clustering to get the main object and remove background noise
         if len(pcd_copy.points) > 100:
@@ -362,11 +184,11 @@ def process_pcds(pcds, reconstruction_config):
     # Compute FPFH features for target
     target_down = target_pcd.voxel_down_sample(voxel_size * 3)
     target_down.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5, max_nn=100)
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 10, max_nn=100)
     )
     target_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
         target_down,
-        o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5, max_nn=100)
+        o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 10, max_nn=100)
     )
     
     # Process each source point cloud
@@ -379,11 +201,11 @@ def process_pcds(pcds, reconstruction_config):
         # Compute FPFH features for source
         source_down = source_pcd.voxel_down_sample(voxel_size * 3)
         source_down.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5, max_nn=100)
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 10, max_nn=100)
         )
         source_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
             source_down,
-            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5, max_nn=100)
+            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 10, max_nn=100)
         )
         
         # Global registration using RANSAC with FPFH features
@@ -391,12 +213,12 @@ def process_pcds(pcds, reconstruction_config):
         registration_result = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
             source_down, target_down, source_fpfh, target_fpfh,
             mutual_filter=True,
-            max_correspondence_distance=voxel_size * 6,
+            max_correspondence_distance=voxel_size * 10,
             estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
             ransac_n=3,
             checkers=[
                 o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
-                o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(voxel_size * 6)
+                o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(voxel_size * 10)
             ],
             criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(1000000, 0.999)
         )
@@ -405,7 +227,7 @@ def process_pcds(pcds, reconstruction_config):
         initial_transform = registration_result.transformation
         
         # Try multiple strategies if global registration fails
-        if registration_result.fitness < 0.3:
+        if registration_result.fitness < 0.6:
             print("Global registration unsuccessful, trying alternative strategies...")
             
             # Try alternative rotations (90-degree intervals around each axis)
@@ -444,7 +266,7 @@ def process_pcds(pcds, reconstruction_config):
                 print("Trying subsampling strategy...")
                 
                 # Take different subsets of points to find better alignment
-                n_attempts = 5
+                n_attempts = 10
                 subset_ratio = 0.7
                 
                 for attempt in range(n_attempts):
@@ -469,21 +291,50 @@ def process_pcds(pcds, reconstruction_config):
                     initial_transform = best_transform
                     print(f"Subsampling strategy successful, fitness: {best_fitness}")
         
-        # Fine ICP registration with the initial transformation
+        # Replace the fine ICP registration block with this improved version
         print("Performing fine ICP registration...")
-        fine_icp_result = o3d.pipelines.registration.registration_icp(
-            source_pcd, target_pcd, voxel_size * 2,
-            initial_transform,
-            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-            o3d.pipelines.registration.ICPConvergenceCriteria(
-                max_iteration=reconstruction_config.get('icp_max_iter', 100),
-                relative_fitness=1e-6,
-                relative_rmse=1e-6
+        # Use a much larger correspondence distance at first to ensure matches
+        initial_distance = voxel_size * 10  # Try a larger initial distance
+
+        # Try multi-stage ICP with gradually decreasing distance thresholds
+        current_transform = initial_transform
+        for distance_multiplier in [10, 5, 2]:
+            current_distance = voxel_size * distance_multiplier
+            icp_result = o3d.pipelines.registration.registration_icp(
+                source_pcd, target_pcd, current_distance,
+                current_transform,  # Use the progressively refined transformation
+                o3d.pipelines.registration.TransformationEstimationPointToPoint(),  # First use point-to-point (more robust)
+                o3d.pipelines.registration.ICPConvergenceCriteria(
+                    max_iteration=50
+                )
             )
-        )
-        
-        print(f"Fine ICP fitness: {fine_icp_result.fitness}")
-        final_transform = fine_icp_result.transformation
+            
+            # Update the transformation if ICP improved the alignment
+            if icp_result.fitness > 0.0:
+                current_transform = icp_result.transformation
+                print(f"ICP stage with distance {current_distance} achieved fitness: {icp_result.fitness}")
+            else:
+                print(f"ICP stage with distance {current_distance} failed")
+
+        # Final fine ICP with point-to-plane for precision
+        if current_transform is not initial_transform:  # Only if earlier stages worked
+            fine_icp_result = o3d.pipelines.registration.registration_icp(
+                source_pcd, target_pcd, voxel_size * 2,
+                current_transform,
+                o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+                o3d.pipelines.registration.ICPConvergenceCriteria(
+                    max_iteration=reconstruction_config.get('icp_max_iter', 100),
+                    relative_fitness=1e-6,
+                    relative_rmse=1e-6
+                )
+            )
+            
+            print(f"Final ICP fitness: {fine_icp_result.fitness}")
+            final_transform = fine_icp_result.transformation
+        else:
+            # Fallback if ICP completely fails
+            print("All ICP stages failed, using global registration result")
+            final_transform = initial_transform
         
         # Update the transformation dictionary
         transformations[i] = final_transform
@@ -495,12 +346,17 @@ def process_pcds(pcds, reconstruction_config):
     
     # Final cleanup of the fused point cloud
     print("Final cleanup and optimization...")
-    
+
     # Remove outliers from the final point cloud
     if len(fused_pcd.points) > 200:
         fused_pcd, _ = fused_pcd.remove_statistical_outlier(
-            nb_neighbors=reconstruction_config.get('nb_neighbors', 20),
+            nb_neighbors=reconstruction_config.get('nb_neighbors', 50),
             std_ratio=reconstruction_config.get('std_ratio', 2.0)
+        )
+         # Add radius outlier removal as well
+        fused_pcd, _ = fused_pcd.remove_radius_outlier(
+            nb_points=50,  # Require at least 50 points in neighborhood
+            radius=0.02    # Within 2cm radius
         )
     
     # Apply Poisson surface reconstruction to get a smoother result
@@ -525,225 +381,14 @@ def process_pcds(pcds, reconstruction_config):
         fused_pcd = pcd_from_mesh
     
     # Final voxel downsampling to unify point density
-    if reconstruction_config.get('voxel_size') and len(fused_pcd.points) > 0:
+    if reconstruction_config.get('voxel_size') and len(fused_pcd.points) > 30000:
         fused_pcd = fused_pcd.voxel_down_sample(reconstruction_config['voxel_size'])
     
     # Ensure normals for the final result
     fused_pcd.estimate_normals()
     
-    # After fusion is complete, add orientation correction
-    if reconstruction_config.get('orient_for_grasping', True):
-        print("Orienting point cloud for top-down grasping...")
-        fused_pcd, orientation_transform = orient_for_top_grasping(
-            fused_pcd, 
-            debug=reconstruction_config.get('debug_orientation', False)
-        )
-        
-        # Update all transformations to include the orientation correction
-        for key in transformations:
-            transformations[key] = orientation_transform @ transformations[key]
-    
     print(f"Fusion complete. Final point cloud has {len(fused_pcd.points)} points.")
     return transformations, fused_pcd
-
-def detect_and_correct_orientation(pcd, method='pca'):
-    """
-    Detect the orientation of the point cloud and correct it to face upward.
-    
-    Args:
-        pcd: Open3D point cloud
-        method: 'pca' for PCA-based, 'ransac' for plane-fitting based
-    Returns:
-        corrected_pcd: Reoriented point cloud
-        transform: Applied transformation matrix
-    """
-    corrected_pcd = copy.deepcopy(pcd)
-    
-    if method == 'pca':
-        # Use PCA to find the principal axes
-        points = np.asarray(corrected_pcd.points)
-        centroid = np.mean(points, axis=0)
-        points_centered = points - centroid
-        
-        # Compute covariance matrix and eigenvalues/eigenvectors
-        cov = np.cov(points_centered.T)
-        eigenvalues, eigenvectors = np.linalg.eigh(cov)
-        
-        # Sort eigenvectors by eigenvalues (largest to smallest)
-        idx = eigenvalues.argsort()[::-1]
-        eigenvectors = eigenvectors[:, idx]
-        
-        # The smallest eigenvector is often the "up" direction for flat objects
-        # We want this to align with the Z-axis
-        up_vector = eigenvectors[:, 2]
-        
-        # If the up vector points downward, flip it
-        if up_vector[2] < 0:
-            up_vector = -up_vector
-        
-        # Create rotation matrix to align up_vector with Z-axis
-        z_axis = np.array([0, 0, 1])
-        v = np.cross(up_vector, z_axis)
-        s = np.linalg.norm(v)
-        c = np.dot(up_vector, z_axis)
-        
-        if s < 1e-6:  # Vectors are already aligned
-            rotation = np.eye(3)
-        else:
-            vx = np.array([[0, -v[2], v[1]],
-                          [v[2], 0, -v[0]],
-                          [-v[1], v[0], 0]])
-            rotation = np.eye(3) + vx + np.dot(vx, vx) * ((1 - c) / (s * s))
-        
-        # Create transformation matrix
-        transform = np.eye(4)
-        transform[:3, :3] = rotation
-        transform[:3, 3] = -np.dot(rotation, centroid) + centroid
-        
-    elif method == 'ransac':
-        # Use RANSAC to fit a plane and align the object
-        plane_model, inliers = corrected_pcd.segment_plane(
-            distance_threshold=0.01,
-            ransac_n=3,
-            num_iterations=1000
-        )
-        
-        # Extract plane normal
-        normal = np.array(plane_model[:3])
-        
-        # Ensure normal points upward
-        if normal[2] < 0:
-            normal = -normal
-        
-        # Create rotation matrix to align normal with Z-axis
-        z_axis = np.array([0, 0, 1])
-        v = np.cross(normal, z_axis)
-        s = np.linalg.norm(v)
-        c = np.dot(normal, z_axis)
-        
-        if s < 1e-6:  # Vectors are already aligned
-            rotation = np.eye(3)
-        else:
-            vx = np.array([[0, -v[2], v[1]],
-                          [v[2], 0, -v[0]],
-                          [-v[1], v[0], 0]])
-            rotation = np.eye(3) + vx + np.dot(vx, vx) * ((1 - c) / (s * s))
-        
-        # Create transformation matrix
-        transform = np.eye(4)
-        transform[:3, :3] = rotation
-        
-        # Center the point cloud
-        points = np.asarray(corrected_pcd.points)
-        centroid = np.mean(points, axis=0)
-        transform[:3, 3] = -np.dot(rotation, centroid) + centroid
-    
-    # Apply transformation
-    corrected_pcd.transform(transform)
-    
-    return corrected_pcd, transform
-
-
-def detect_object_top_surface(pcd, percentile=90):
-    """
-    Detect the top surface of an object by analyzing point distribution.
-    
-    Args:
-        pcd: Open3D point cloud
-        percentile: Percentile of points to consider as "top"
-    Returns:
-        top_normal: Normal vector of the top surface
-    """
-    points = np.asarray(pcd.points)
-    normals = np.asarray(pcd.normals)
-    
-    # Find points in the top percentile by Z coordinate
-    z_threshold = np.percentile(points[:, 2], percentile)
-    top_indices = points[:, 2] >= z_threshold
-    
-    if np.sum(top_indices) < 10:
-        # Fallback to simpler method
-        return np.array([0, 0, 1])
-    
-    # Average the normals of top points
-    top_normals = normals[top_indices]
-    avg_normal = np.mean(top_normals, axis=0)
-    avg_normal = avg_normal / np.linalg.norm(avg_normal)
-    
-    # Ensure it points upward
-    if avg_normal[2] < 0:
-        avg_normal = -avg_normal
-    
-    return avg_normal
-
-
-def orient_for_top_grasping(pcd, debug=False):
-    """
-    Orient the point cloud specifically for top-down grasping.
-    This ensures the graspable surface is facing upward.
-    
-    Args:
-        pcd: Open3D point cloud
-        debug: If True, visualize the orientation process
-    Returns:
-        oriented_pcd: Properly oriented point cloud
-        transform: Applied transformation
-    """
-    oriented_pcd = copy.deepcopy(pcd)
-    
-    # Step 1: Initial orientation using PCA or RANSAC
-    oriented_pcd, transform1 = detect_and_correct_orientation(pcd, method='pca')
-    
-    # Step 2: Detect the actual top surface
-    oriented_pcd.estimate_normals()
-    top_normal = detect_object_top_surface(oriented_pcd)
-    
-    # Step 3: Fine-tune orientation based on top surface normal
-    z_axis = np.array([0, 0, 1])
-    angle = np.arccos(np.clip(np.dot(top_normal, z_axis), -1, 1))
-    
-    if angle > np.radians(10):  # If deviation is significant
-        # Compute rotation axis
-        rotation_axis = np.cross(top_normal, z_axis)
-        rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
-        
-        # Create rotation matrix using Rodrigues' formula
-        K = np.array([[0, -rotation_axis[2], rotation_axis[1]],
-                     [rotation_axis[2], 0, -rotation_axis[0]],
-                     [-rotation_axis[1], rotation_axis[0], 0]])
-        
-        rotation = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * np.dot(K, K)
-        
-        # Apply fine-tuning transformation
-        transform2 = np.eye(4)
-        transform2[:3, :3] = rotation
-        
-        oriented_pcd.transform(transform2)
-        transform = transform2 @ transform1
-    else:
-        transform = transform1
-    
-    # Step 4: Ensure the object is centered and sitting on a plane
-    points = np.asarray(oriented_pcd.points)
-    min_z = np.min(points[:, 2])
-    centroid = np.mean(points, axis=0)
-    
-    # Translate to origin and place on ground plane
-    translation = np.eye(4)
-    translation[:3, 3] = [-centroid[0], -centroid[1], -min_z]
-    
-    oriented_pcd.transform(translation)
-    transform = translation @ transform
-    
-    if debug:
-        # Visualize the orientation process
-        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
-        o3d.visualization.draw_geometries(
-            [oriented_pcd, coord_frame],
-            window_name="Oriented Point Cloud for Top Grasping"
-        )
-    
-    return oriented_pcd, transform
 
 def process_single_pcd(pcd, reconstruction_config):
     # Step 1: Apply statistical outlier removal to filter noise
@@ -1005,8 +650,8 @@ def get_single_pointcloud_fixed(realsense_input, groundingdino_output, camera_id
         rospy.loginfo(f"Camera {camera_id} - Image dimensions: {width_img}x{height_img}")
         
         # FIX 1: Increase margin for better object capture
-        margin_w = width * 0.2  # Increase from 0.1 to 0.2 (20% margin)
-        margin_h = height * 0.2  # Increase from 0.1 to 0.2 (20% margin)
+        margin_w = width * 0.08  # (8% margin)
+        margin_h = height * 0.08  # (8% margin)
         
         # Calculate pixel coordinates from normalized coordinates with margin
         x_min = max(0, (center_x - width/2 - margin_w) * width_img)
@@ -1113,7 +758,7 @@ def get_single_pointcloud_fixed(realsense_input, groundingdino_output, camera_id
         mask_reshaped = mask.reshape(-1)
         
         # Create combined mask: bounding box AND reasonable Z values
-        reasonable_z_mask = (points_reshaped[:,2] > -0.1) & (points_reshaped[:,2] < 2.0)  # Between -10cm and 2m
+        reasonable_z_mask = (points_reshaped[:,2] > -0.3) & (points_reshaped[:,2] < 2.5)  # Between -30cm and 2.5m
         combined_mask = mask_reshaped & reasonable_z_mask
         
         # Filter points using the combined mask
@@ -1150,22 +795,26 @@ def get_single_pointcloud_fixed(realsense_input, groundingdino_output, camera_id
         # FIX 9: More conservative outlier removal
         if len(filtered_points) > 100:
             original_count = len(pcd.points)
-            pcd, outlier_indices = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.5)  # Increased threshold
+            pcd, outlier_indices = pcd.remove_statistical_outlier(reconstruction_config['nb_neighbors'], reconstruction_config['std_ratio'])  # Increased threshold
             rospy.loginfo(f"Camera {camera_id} - After outlier removal: {len(pcd.points)} points (removed {original_count - len(pcd.points)})")
         
         # FIX 10: Optional voxel downsampling (only if too many points)
         if len(pcd.points) > 50000:  # Only downsample if too many points
-            voxel_size = 0.002  # 2mm voxels
+            # voxel_size = 0.002  # 2mm voxels
             original_count = len(pcd.points)
-            pcd = pcd.voxel_down_sample(voxel_size)
+            pcd = pcd.voxel_down_sample(reconstruction_config['voxel_size'])
             rospy.loginfo(f"Camera {camera_id} - After downsampling: {len(pcd.points)} points (removed {original_count - len(pcd.points)})")
         
         # FIX 11: Ensure we still have a reasonable number of points
-        if len(pcd.points) < 100:
+        if len(pcd.points) < 1000:
             rospy.logwarn(f"Camera {camera_id} - Too few points after processing: {len(pcd.points)}")
             return None
         
         rospy.loginfo(f"Camera {camera_id} - Successfully generated point cloud with {len(pcd.points)} points")
+        
+        # visualization
+        frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
+        o3d.visualization.draw_geometries([pcd, frame])
         return pcd
         
     except Exception as e:
@@ -1317,8 +966,8 @@ def get_single_pointcloud_with_debug(realsense_input, groundingdino_output, came
         print(f"Image dimensions: {width_img}x{height_img}")
         
         # Calculate bounding box in pixels
-        margin_w = width * 0.1
-        margin_h = height * 0.1
+        margin_w = width * 0.2
+        margin_h = height * 0.2
         
         x_min = max(0, (center_x - width/2 - margin_w) * width_img)
         y_min = max(0, (center_y - height/2 - margin_h) * height_img)
@@ -1515,6 +1164,14 @@ def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_i
     """
     try:
         pcds = []
+        transformations = {}
+        camera_info_dict = {}
+
+        # Verify camera transforms if possible
+        try:
+            verify_camera_transform()
+        except Exception as e:
+            rospy.logwarn(f"Camera transform verification skipped: {e}")
         
         # Process each camera with its own bounding box
         for camera_id, realsense_input in realsense_input_dict.items():
@@ -1525,28 +1182,45 @@ def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_i
                 
             box_filter = groundingdino_output_dict[camera_id].box_filter[0]
             rospy.loginfo(f"Camera {camera_id} - Box Filter: {box_filter}")
-            
+
             # Convert box_filter to numpy if it's a tensor
             if hasattr(box_filter, 'numpy'):
-                box_filter_np = box_filter.numpy() 
+                    box_filter_np = box_filter.numpy() 
             else:
                 box_filter_np = np.array(box_filter)
-            
+                    
             # Extract box coordinates (center_x, center_y, width, height)
             center_x, center_y, width, height = box_filter_np
+            
+            # Debug the bounding box values
+            rospy.loginfo(f"Camera {camera_id} - Detection: center=({center_x:.3f}, {center_y:.3f}), size=({width:.3f}, {height:.3f})")
+            
+            # Validate bounding box
+            if width <= 0 or height <= 0:
+                rospy.logerr(f"Camera {camera_id} - Invalid bounding box dimensions: width={width}, height={height}")
+                return None
+                
+            if center_x < 0 or center_x > 1 or center_y < 0 or center_y > 1:
+                rospy.logerr(f"Camera {camera_id} - Invalid bounding box center: ({center_x}, {center_y})")
+                return None
             
             # Get camera data
             color_image_np = realsense_input.color_image_np
             depth_image_np = realsense_input.depth_image_np
             camera_info = realsense_input.camera_info
+
+            # Store camera info for later use
+            camera_info_dict[camera_id] = camera_info
             
             # Get image dimensions
             height_img, width_img = depth_image_np.shape[:2] if len(depth_image_np.shape) > 2 else depth_image_np.shape
+            rospy.loginfo(f"Camera {camera_id} - Image dimensions: {width_img}x{height_img}")
+            
+            # FIX 1: Increase margin for better object capture
+            margin_w = width * 0.2  # (20% margin)
+            margin_h = height * 0.2  # (20% margin)
             
             # Calculate pixel coordinates from normalized coordinates with margin
-            margin_w = width * 0.1  # 10% margin
-            margin_h = height * 0.1  # 10% margin
-            
             x_min = max(0, (center_x - width/2 - margin_w) * width_img)
             y_min = max(0, (center_y - height/2 - margin_h) * height_img)
             x_max = min(width_img, (center_x + width/2 + margin_w) * width_img)
@@ -1558,100 +1232,220 @@ def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_i
             
             rospy.loginfo(f"Camera {camera_id} - Bounding box in pixels: x_min={x_min}, y_min={y_min}, x_max={x_max}, y_max={y_max}")
             
+            # FIX 2: Validate pixel coordinates
+            if x_max <= x_min or y_max <= y_min:
+                rospy.logerr(f"Camera {camera_id} - Invalid pixel bounding box: ({x_min}, {y_min}) to ({x_max}, {y_max})")
+                return None
+            
+            # Check depth image statistics before masking
+            depth_valid = depth_image_np[depth_image_np > 0]
+            if len(depth_valid) == 0:
+                rospy.logerr(f"Camera {camera_id} - No valid depth data in entire image")
+                return None
+                
+            rospy.loginfo(f"Camera {camera_id} - Depth range: {np.min(depth_valid):.3f} to {np.max(depth_valid):.3f}m")
+            
             # Create a mask for the pixels within the bounding box
             mask = np.zeros((height_img, width_img), dtype=bool)
             mask[y_min:y_max, x_min:x_max] = True
+            rospy.loginfo(f"Camera {camera_id} - Mask covers {np.sum(mask)} pixels ({100*np.sum(mask)/(width_img*height_img):.1f}% of image)")
             
             # Apply mask to depth image
             masked_depth = np.copy(depth_image_np)
             masked_depth[~mask] = 0
             
-            # Skip if no valid depth in the masked region
-            if np.all(masked_depth == 0):
-                rospy.logwarn(f"Camera {camera_id} - No valid depth data in bounding box region")
-                continue
+            # FIX 3: Check masked depth statistics
+            masked_valid = masked_depth[masked_depth > 0]
+            if len(masked_valid) == 0:
+                rospy.logerr(f"Camera {camera_id} - No valid depth data in bounding box region")
+                
+                # Debug: Save depth image for inspection
+                import cv2
+                debug_depth = (depth_image_np / np.max(depth_image_np) * 255).astype(np.uint8)
+                debug_depth_colored = cv2.applyColorMap(debug_depth, cv2.COLORMAP_JET)
+                cv2.rectangle(debug_depth_colored, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+                cv2.imwrite(f'/tmp/debug_depth_cam_{camera_id}.png', debug_depth_colored)
+                rospy.loginfo(f"Camera {camera_id} - Saved debug depth image to /tmp/debug_depth_cam_{camera_id}.png")
+                
+                continue  # Skip this camera
+            
+            rospy.loginfo(f"Camera {camera_id} - Masked depth range: {np.min(masked_valid):.3f} to {np.max(masked_valid):.3f}m, mean: {np.mean(masked_valid):.3f}m")
+            rospy.loginfo(f"Camera {camera_id} - Valid masked pixels: {len(masked_valid)}")
                 
             # Convert masked depth to point cloud
             xyz = get_pointcloud(masked_depth, camera_info["intrinsic_matrix"])
             
+            # FIX 4: Debug camera frame points before transformation
+            valid_camera_mask = xyz[:,:,2] > 0
+            if np.sum(valid_camera_mask) == 0:
+                rospy.logerr(f"Camera {camera_id} - No valid 3D points generated from depth")
+                return None
+                
+            valid_camera_points = xyz[valid_camera_mask]
+            rospy.loginfo(f"Camera {camera_id} - Camera frame points: {len(valid_camera_points)}")
+            rospy.loginfo(f"Camera {camera_id} - Camera frame X: [{np.min(valid_camera_points[:,0]):.3f}, {np.max(valid_camera_points[:,0]):.3f}]")
+            rospy.loginfo(f"Camera {camera_id} - Camera frame Y: [{np.min(valid_camera_points[:,1]):.3f}, {np.max(valid_camera_points[:,1]):.3f}]")
+            rospy.loginfo(f"Camera {camera_id} - Camera frame Z: [{np.min(valid_camera_points[:,2]):.3f}, {np.max(valid_camera_points[:,2]):.3f}]")
+            
             # Apply transform to world coordinates
             position = np.array(camera_info["position"]).reshape(3, 1)
-            rotation = p.getMatrixFromQuaternion(camera_info["orientation"])
-            rotation = np.array(rotation).reshape(3, 3)
+            orientation = np.array(camera_info["orientation"])  # [x, y, z, w]
+            
+            # FIX 5: Use scipy for quaternion conversion instead of pybullet
+            from scipy.spatial.transform import Rotation as R
+            rotation = R.from_quat(orientation).as_matrix()
+            
             transform = np.eye(4)
             transform[:3, :3] = rotation
             transform[:3, 3] = position.flatten()
             
+            rospy.loginfo(f"Camera {camera_id} - Transform:\nPosition: {position.flatten()}\nRotation matrix:\n{rotation}")
+            
             # Transform points to world coordinates
             transformed_points = transform_pointcloud(xyz, transform)
             
-            # Filter out points with zero depth (outside the bounding box)
-            valid_points = (transformed_points[:,:,2] > 0)
-            if np.sum(valid_points) < 50:
-                rospy.logwarn(f"Camera {camera_id} - Not enough valid points ({np.sum(valid_points)}) in bounding box")
-                continue
-                
+            # FIX 7: Improved point filtering
             # Reshape for filtering
             points_shape = transformed_points.shape
             points_reshaped = transformed_points.reshape(-1, 3)
             mask_reshaped = mask.reshape(-1)
             
-            # Filter points using the mask
-            filtered_points = points_reshaped[mask_reshaped & (points_reshaped[:,2] > 0)]
+            # Create combined mask: bounding box AND reasonable Z values
+            reasonable_z_mask = (points_reshaped[:,2] > -0.1) & (points_reshaped[:,2] < 2.0)  # Between -10cm and 2.0m
+            combined_mask = mask_reshaped & reasonable_z_mask
+            
+            # Filter points using the combined mask
+            filtered_points = points_reshaped[combined_mask]
             
             # Get corresponding colors
             color_reshaped = color_image_np.reshape(-1, 3)
-            filtered_colors = color_reshaped[mask_reshaped & (points_reshaped[:,2] > 0)]
+            filtered_colors = color_reshaped[combined_mask]
+            
+            # FIX 8: Check filtering results
+            if len(filtered_points) == 0:
+                rospy.logerr(f"Camera {camera_id} - No points after filtering")
+                rospy.loginfo(f"Camera {camera_id} - Mask sum: {np.sum(mask_reshaped)}")
+                rospy.loginfo(f"Camera {camera_id} - Reasonable Z sum: {np.sum(reasonable_z_mask)}")
+                rospy.loginfo(f"Camera {camera_id} - Combined mask sum: {np.sum(combined_mask)}")
+                return None
             
             # Log statistics
-            if len(filtered_points) > 0:
-                x_values = filtered_points[:, 0]
-                y_values = filtered_points[:, 1]
-                z_values = filtered_points[:, 2]
-                
-                rospy.loginfo(f"Camera {camera_id} - Filtered points stats:")
-                rospy.loginfo(f"X: max={np.max(x_values)}, min={np.min(x_values)}, mean={np.mean(x_values)}")
-                rospy.loginfo(f"Y: max={np.max(y_values)}, min={np.min(y_values)}, mean={np.mean(y_values)}")
-                rospy.loginfo(f"Z: max={np.max(z_values)}, min={np.min(z_values)}, mean={np.mean(z_values)}")
-                rospy.loginfo(f"Total valid points: {len(filtered_points)}")
+            x_values = filtered_points[:, 0]
+            y_values = filtered_points[:, 1]
+            z_values = filtered_points[:, 2]
+            
+            rospy.loginfo(f"Camera {camera_id} - Filtered points stats:")
+            rospy.loginfo(f"X: max={np.max(x_values):.3f}, min={np.min(x_values):.3f}, mean={np.mean(x_values):.3f}")
+            rospy.loginfo(f"Y: max={np.max(y_values):.3f}, min={np.min(y_values):.3f}, mean={np.mean(y_values):.3f}")
+            rospy.loginfo(f"Z: max={np.max(z_values):.3f}, min={np.min(z_values):.3f}, mean={np.mean(z_values):.3f}")
+            rospy.loginfo(f"Total valid points: {len(filtered_points)}")
             
             # Create point cloud
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(filtered_points)
             pcd.colors = o3d.utility.Vector3dVector(filtered_colors / 255.0)
             
-            # Apply statistical outlier removal
+            # FIX 9: More conservative outlier removal
             if len(filtered_points) > 100:
-                pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
-                rospy.loginfo(f"Camera {camera_id} - After outlier removal: {len(pcd.points)} points")
+                original_count = len(pcd.points)
+                pcd, outlier_indices = pcd.remove_statistical_outlier(reconstruction_config['nb_neighbors'], reconstruction_config['std_ratio'])  # Increased threshold
+                rospy.loginfo(f"Camera {camera_id} - After outlier removal: {len(pcd.points)} points (removed {original_count - len(pcd.points)})")
             
-            # Apply voxel downsampling if configured
-            if len(pcd.points) > 0 and hasattr(pcd, 'voxel_down_sample') and reconstruction_config.get('voxel_size'):
+            # FIX 10: Optional voxel downsampling (only if too many points)
+            if len(pcd.points) > 50000:  # Only downsample if too many points
+                original_count = len(pcd.points)
                 pcd = pcd.voxel_down_sample(reconstruction_config['voxel_size'])
-                rospy.loginfo(f"Camera {camera_id} - After downsampling: {len(pcd.points)} points")
+                rospy.loginfo(f"Camera {camera_id} - After downsampling: {len(pcd.points)} points (removed {original_count - len(pcd.points)})")
             
-            # Add to point cloud list if enough points
-            if len(pcd.points) > 20:
-                pcds.append(pcd)
-                rospy.loginfo(f"Camera {camera_id} - Added point cloud with {len(pcd.points)} points")
+            # FIX 11: Ensure we still have a reasonable number of points
+            if len(pcd.points) < 100:
+                rospy.logwarn(f"Camera {camera_id} - Too few points after processing: {len(pcd.points)}")
+                continue
+
+            # Check for initial plane detection in individual views
+            try:
+                plane_model, inliers, success = detect_table_plane(pcd, distance_threshold=reconstruction_config.get('plane_distance_threshold', 0.01))
+                if success:
+                    normal = np.array(plane_model[:3])
+                    normal = normal / np.linalg.norm(normal)
+                    rospy.loginfo(f"Camera {camera_id} - Detected plane normal: [{normal[0]:.3f}, {normal[1]:.3f}, {normal[2]:.3f}]")
+                    
+                    # Check if plane is roughly horizontal (in world coordinates)
+                    angle = np.arccos(np.abs(normal[2])) * 180 / np.pi
+                    rospy.loginfo(f"Camera {camera_id} - Detected plane angle with vertical: {angle:.1f}°")
+            except Exception as e:
+                rospy.logwarn(f"Camera {camera_id} - Plane detection failed: {e}")
+
+            # visualization
+            frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
+            o3d.visualization.draw_geometries([pcd, frame], f"Camera {camera_id} - Point Cloud")
+            
+            pcds.append(pcd)
+            rospy.loginfo(f"Camera {camera_id} - Added point cloud with {len(pcd.points)} points")
         
         # Process point clouds for fusion
         if len(pcds) == 0:
             rospy.logwarn("No valid point clouds to merge")
-            return None
+            return [], [], [], []
         elif len(pcds) == 1:
             rospy.loginfo("Only one valid point cloud, no fusion needed")
             return pcds[0]
         else:
             # Use process_pcds function to align and merge the point clouds
-            _, fuse_pcd = process_pcds(pcds, reconstruction_config)
+            fused_trans_world, fused_pcd_world = process_pcds(pcds, reconstruction_config)
             
-            if fuse_pcd is not None and len(fuse_pcd.points) > 0:
-                rospy.loginfo(f"Successfully fused {len(pcds)} point clouds, resulting in {len(fuse_pcd.points)} points")
-                return fuse_pcd
+            if fused_pcd_world is not None and len(fused_pcd_world.points) > 0:
+                rospy.loginfo(f"Successfully fused {len(pcds)} point clouds, resulting in {len(fused_pcd_world.points)} points")
+
+                # After fusion is complete, add orientation correction
+                if reconstruction_config.get('orient_for_grasping', False):
+                    print("Orienting point cloud for top-down grasping...")
+                    fused_pcd_canonical, fused_trans_canonical = orient_for_top_grasping(
+                        fused_pcd_world, 
+                        debug=reconstruction_config.get('debug_orientation', False)
+                    )
+                    # Optional visualization of final result
+                    if reconstruction_config.get('visualize_final', False):
+                        frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
+                        o3d.visualization.draw_geometries([fused_pcd_canonical, frame], "Final Aligned Point Cloud")
+                return fused_pcd_world, fused_pcd_canonical, fused_trans_world, fused_trans_canonical
             else:
                 rospy.logwarn("Fusion resulted in empty point cloud")
-                return None
+                return [], [], [], []
+
+        # rospy.loginfo("Performing explicit table alignment...")
+        # aligned_pcd, alignment_transform, alignment_success = align_to_table_plane(
+        #     fused_pcd_world,
+        #     distance_threshold=reconstruction_config.get('plane_distance_threshold', 0.01),
+        #     visualize=reconstruction_config.get('visualize_alignment', False)
+        # )
+
+        # if not alignment_success:
+        #     rospy.logwarn("Table alignment failed, falling back to orient_for_top_grasping")
+        #     # Fall back to orient_for_top_grasping if table alignment fails
+        #     if reconstruction_config.get('orient_for_grasping', True):
+        #         aligned_pcd, alignment_transform = orient_for_top_grasping(
+        #             fused_pcd_world, 
+        #             debug=reconstruction_config.get('debug_orientation', False)
+        #         )
+        
+        # # Post-process to clean up point cloud
+        # fused_pcd_canonical = post_process_aligned_pointcloud(
+        #     aligned_pcd,
+        #     min_height=reconstruction_config.get('min_object_height', 0.005),
+        #     max_height=reconstruction_config.get('max_object_height', 0.5),
+        #     voxel_size=reconstruction_config.get('final_voxel_size', 0.002)
+        # )
+        
+        # # Calculate canonical transform
+        # fused_trans_canonical = alignment_transform
+        
+        # # Optional visualization of final result
+        # if reconstruction_config.get('visualize_final', False):
+        #     frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
+        #     o3d.visualization.draw_geometries([fused_pcd_canonical, frame], "Final Aligned Point Cloud")
+        
+        # return fused_pcd_world, fused_pcd_canonical, fused_trans_world, fused_trans_canonical
                 
     except Exception as e:
         rospy.logerr(f"Failed to create single fuse cloudpoint: {e}")
@@ -1659,598 +1453,572 @@ def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_i
         rospy.logerr(traceback.format_exc())
         return None
 
-# def get_true_bboxs(env, color_image, depth_image, mask_image, workspace_limits, pixel_size):
-#     # get mask of all objects
-#     bbox_images = []
-#     bbox_positions = []
-#     for obj_id in env.obj_ids["rigid"]:
-#         mask = np.zeros(mask_image.shape).astype(np.uint8)
-#         mask[mask_image == obj_id] = 255
-#         _, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-#         stats = stats[stats[:, 4].argsort()]
-#         if stats[:-1].shape[0] > 0:
-#             bbox = stats[:-1][0]
-#             # for bbox
-#             # |(y0, x0)         |   
-#             # |                 |
-#             # |                 |
-#             # |         (y1, x1)|
-#             x0, y0 = bbox[0], bbox[1]
-#             x1 = bbox[0] + bbox[2]
-#             y1 = bbox[1] + bbox[3]
-
-#             # visualization
-#             start_point, end_point = (x0, y0), (x1, y1)
-#             color = (0, 0, 255) # Red color in BGR
-#             thickness = 1 # Line thickness of 1 px 
-#             mask_BGR = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-#             mask_bboxs = cv2.rectangle(mask_BGR, start_point, end_point, color, thickness)
-#             cv2.imwrite('mask_bboxs.png', mask_bboxs)
-#             # cv2.imshow("1", mask_bboxs)
-#             # cv2.waitKey(0)
-#             # cv2.destroyAllWindows()
-
-#             bbox_image = color_image[y0:y1, x0:x1]
-#             bbox_images.append(bbox_image)
-            
-#             pixel_x = (x0 + x1) // 2
-#             pixel_y = (y0 + y1) // 2
-#             bbox_pos = [
-#                 pixel_y * pixel_size + workspace_limits[0][0],
-#                 pixel_x * pixel_size + workspace_limits[1][0],
-#                 depth_image[pixel_y][pixel_x] + workspace_limits[2][0],
-#             ]
-#             bbox_positions.append(bbox_pos)
-#     # cv2.imshow("1", mask_bboxs)
-#     # cv2.waitKey(0)
-#     # cv2.destroyAllWindows()
-#     return bbox_images, bbox_positions
-
-
-def relabel_mask(env, mask_image):
-    assert env.target_obj_id != -1
-    num_obj = 50
-    for i in np.unique(mask_image):
-        if i == env.target_obj_id:
-            mask_image[mask_image == i] = 255
-        elif i in env.obj_ids["rigid"]:
-            mask_image[mask_image == i] = num_obj
-            num_obj += 10
-        else:
-            mask_image[mask_image == i] = 0
-    mask_image = mask_image.astype(np.uint8)
-    return mask_image
-
-
-def relabel_mask_real(masks):
-    """Assume the target object is labeled to 255"""
-    mask_image = np.zeros_like(masks[0], dtype=np.uint8)
-    num_obj = 50
-    for idx, mask in enumerate(masks):
-        if idx == 0:
-            mask_image[mask == 255] = 255
-        else:
-            mask_image[mask == 255] = num_obj
-            num_obj += 10
-    mask_image = mask_image.astype(np.uint8)
-    return mask_image
-
-
-def get_real_heightmap(env):
-    """Get RGB-D orthographic heightmaps in real world."""
-
-    color, depth = env.get_camera_data()
-    cv2.imwrite("temp.png", cv2.cvtColor(color, cv2.COLOR_RGB2BGR))
-
-    # Reconstruct real orthographic projection from point clouds.
-    hmaps, cmaps = reconstruct_heightmaps(
-        [color], [depth], env.camera.configs, env.bounds, env.pixel_size
-    )
-
-    # Split color back into color and masks.
-    cmap = np.uint8(cmaps)[0, Ellipsis]
-    hmap = np.float32(hmaps)[0, Ellipsis]
-
-    return cmap, hmap
-
-
-def rotate(image, angle, is_mask=False):
-    """Rotate an image using cv2, counterclockwise in degrees"""
-    (h, w) = image.shape[:2]
-    center = (w // 2, h // 2)
-
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    if is_mask:
-        rotated = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_NEAREST)
-    else:
-        rotated = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_LINEAR)
-
-    return rotated
-
-
-def rotate_point(origin, point, angle):
+def post_process_aligned_pointcloud(pcd, min_height=0.005, max_height=0.5, voxel_size=0.002):
     """
-    Rotate a point counterclockwise by a given angle around a given origin.
-
-    The angle should be given in radians.
-    """
-    ox, oy = origin
-    px, py = point
-
-    qx = ox + math.cos(angle) * (px - ox) - math.sin(angle) * (py - oy)
-    qy = oy + math.sin(angle) * (px - ox) + math.cos(angle) * (py - oy)
-    return qx, qy
-
-
-# Preprocess of model input
-def preprocess(bbox_images, bbox_positions, grasp_pose_set, n_px):
-    transform = Compose([
-        Resize(n_px, interpolation=Image.BICUBIC),
-        CenterCrop(n_px),
-        lambda image: image.convert("RGB"),
-        ToTensor(),
-        Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
-    ])
-    
-    remain_bboxes = []
-    remain_bbox_positions = []
-    for i in range(len(bbox_images)):
-        if bbox_images[i].shape[0] >= 15 and bbox_images[i].shape[1] >= 15:
-            remain_bboxes.append(bbox_images[i])  # shape = [n_obj, H, W, C]
-            remain_bbox_positions.append(bbox_positions[i])
-    print('Remaining bbox number', len(remain_bboxes))
-    bboxes = None
-    for remain_bbox in remain_bboxes:
-        remain_bbox = Image.fromarray(remain_bbox)
-        # padding
-        w,h = remain_bbox.size
-        if w >= h:
-            remain_bbox_ = Image.new(mode='RGB', size=(w,w))
-            remain_bbox_.paste(remain_bbox, box=(0, (w-h)//2))
-        else:
-            remain_bbox_ = Image.new(mode='RGB', size=(h,h))
-            remain_bbox_.paste(remain_bbox, box=((h-w)//2, 0))
-        remain_bbox_ = transform(remain_bbox_)
-
-        remain_bbox_ = remain_bbox_.unsqueeze(0)
-        if bboxes == None:
-            bboxes = remain_bbox_
-        else:
-            bboxes = torch.cat((bboxes, remain_bbox_), dim=0) # shape = [n_obj, C, patch_size, patch_size]
-    if bboxes != None:
-        bboxes = bboxes.unsqueeze(0) # shape = [1, n_obj, C, patch_size, patch_size]
-    
-    pos_bboxes = None
-    for bbox_pos in remain_bbox_positions:
-        bbox_pos = torch.from_numpy(np.array(bbox_pos))
-        bbox_pos = bbox_pos.unsqueeze(0)
-        if pos_bboxes == None:
-            pos_bboxes = bbox_pos
-        else:
-            pos_bboxes = torch.cat((pos_bboxes, bbox_pos), dim=0) # shape = [n_obj, pos_dim]
-    if pos_bboxes != None:
-        pos_bboxes = pos_bboxes.unsqueeze(0).to(dtype=torch.float32) # shape = [1, n_obj, pos_dim]
-    
-
-    grasps = None
-    for grasp in grasp_pose_set:
-        grasp = torch.from_numpy(grasp)
-        grasp = grasp.unsqueeze(0)
-        if grasps == None:
-            grasps = grasp
-        else:
-            grasps = torch.cat((grasps, grasp), dim=0) # shape = [n_grasp, grasp_dim]
-    grasps = grasps.unsqueeze(0).to(dtype=torch.float32) # shape = [1, n_grasp, grasp_dim]
-
-    return remain_bboxes, bboxes, pos_bboxes, grasps
-
-
-def plot_probs(text, bboxes, probs):
-    plt.figure()
-    plt.suptitle(text)
-    for i in range(len(bboxes)):
-        # bboxes[i] = cv2.cvtColor(bboxes[i], cv2.COLOR_RGB2BGR)
-        ax = plt.subplot(1, len(bboxes), i+1)
-        plt.imshow(bboxes[i])
-        plt.xticks([])
-        plt.yticks([])
-        ax.set_title(str(probs[0][i]), fontsize=10)
-    plt.show()
-    
-def plot_attnmap(attn_map):
-    fig, ax = plt.subplots()
-    ax.set_yticks([])
-    # ax.set_yticks(range(attn_map.shape[0]))
-    ax.set_xticks([])
-    im = ax.imshow(attn_map, cmap="YlGnBu", interpolation='nearest')
-    # R
-    plt.colorbar(im)
-
-    # for i in range(attn_map.shape[0]):
-    #     for j in range(attn_map.shape[1]):
-    #         # print('data[{},{}]:{}'.format(i, j, attn_map[i, j]))
-    #         ax.text(j, i, round(attn_map[i, j]*100, 2),
-    #                 ha="center", va="center", color="black")
-
-    # plt.xlabel('cross feat')
-    # plt.ylabel('grasp')
-    # show
-    fig.tight_layout()
-    plt.show()
-
-
-# Get rotation matrix from euler angles
-def euler2rotm(theta):
-    R_x = np.array(
-        [
-            [1, 0, 0],
-            [0, math.cos(theta[0]), -math.sin(theta[0])],
-            [0, math.sin(theta[0]), math.cos(theta[0])],
-        ]
-    )
-    R_y = np.array(
-        [
-            [math.cos(theta[1]), 0, math.sin(theta[1])],
-            [0, 1, 0],
-            [-math.sin(theta[1]), 0, math.cos(theta[1])],
-        ]
-    )
-    R_z = np.array(
-        [
-            [math.cos(theta[2]), -math.sin(theta[2]), 0],
-            [math.sin(theta[2]), math.cos(theta[2]), 0],
-            [0, 0, 1],
-        ]
-    )
-    R = np.dot(R_z, np.dot(R_y, R_x))
-    return R
-
-
-# Checks if a matrix is a valid rotation matrix.
-def isRotm(R):
-    Rt = np.transpose(R)
-    shouldBeIdentity = np.dot(Rt, R)
-    I = np.identity(3, dtype=R.dtype)
-    n = np.linalg.norm(I - shouldBeIdentity)
-    return n < 1e-6
-
-
-# Calculates rotation matrix to euler angles
-def rotm2euler(R):
-
-    assert isRotm(R)
-
-    sy = math.sqrt(R[0, 0] * R[0, 0] + R[1, 0] * R[1, 0])
-    singular = sy < 1e-6
-
-    if not singular:
-        x = math.atan2(R[2, 1], R[2, 2])
-        y = math.atan2(-R[2, 0], sy)
-        z = math.atan2(R[1, 0], R[0, 0])
-    else:
-        x = math.atan2(-R[1, 2], R[1, 1])
-        y = math.atan2(-R[2, 0], sy)
-        z = 0
-
-    return np.array([x, y, z])
-
-
-def angle2rotm(angle, axis, point=None):
-    # Copyright (c) 2006-2018, Christoph Gohlke
-
-    sina = math.sin(angle)
-    cosa = math.cos(angle)
-    axis = axis / np.linalg.norm(axis)
-
-    # Rotation matrix around unit vector
-    R = np.diag([cosa, cosa, cosa])
-    R += np.outer(axis, axis) * (1.0 - cosa)
-    axis *= sina
-    R += np.array(
-        [[0.0, -axis[2], axis[1]], [axis[2], 0.0, -axis[0]], [-axis[1], axis[0], 0.0]],
-        dtype=np.float32,
-    )
-    M = np.identity(4)
-    M[:3, :3] = R
-    if point is not None:
-
-        # Rotation not around origin
-        point = np.array(point[:3], dtype=np.float64, copy=False)
-        M[:3, 3] = point - np.dot(R, point)
-    return M
-
-
-def rotm2angle(R):
-    # From: euclideanspace.com
-
-    epsilon = 0.01  # Margin to allow for rounding errors
-    epsilon2 = 0.1  # Margin to distinguish between 0 and 180 degrees
-
-    assert isRotm(R)
-
-    if (
-        (abs(R[0][1] - R[1][0]) < epsilon)
-        and (abs(R[0][2] - R[2][0]) < epsilon)
-        and (abs(R[1][2] - R[2][1]) < epsilon)
-    ):
-        # Singularity found
-        # First check for identity matrix which must have +1 for all terms in leading diagonaland zero in other terms
-        if (
-            (abs(R[0][1] + R[1][0]) < epsilon2)
-            and (abs(R[0][2] + R[2][0]) < epsilon2)
-            and (abs(R[1][2] + R[2][1]) < epsilon2)
-            and (abs(R[0][0] + R[1][1] + R[2][2] - 3) < epsilon2)
-        ):
-            # this singularity is identity matrix so angle = 0
-            return [0, 1, 0, 0]  # zero angle, arbitrary axis
-
-        # Otherwise this singularity is angle = 180
-        angle = np.pi
-        xx = (R[0][0] + 1) / 2
-        yy = (R[1][1] + 1) / 2
-        zz = (R[2][2] + 1) / 2
-        xy = (R[0][1] + R[1][0]) / 4
-        xz = (R[0][2] + R[2][0]) / 4
-        yz = (R[1][2] + R[2][1]) / 4
-        if (xx > yy) and (xx > zz):  # R[0][0] is the largest diagonal term
-            if xx < epsilon:
-                x = 0
-                y = 0.7071
-                z = 0.7071
-            else:
-                x = np.sqrt(xx)
-                y = xy / x
-                z = xz / x
-        elif yy > zz:  # R[1][1] is the largest diagonal term
-            if yy < epsilon:
-                x = 0.7071
-                y = 0
-                z = 0.7071
-            else:
-                y = np.sqrt(yy)
-                x = xy / y
-                z = yz / y
-        else:  # R[2][2] is the largest diagonal term so base result on this
-            if zz < epsilon:
-                x = 0.7071
-                y = 0.7071
-                z = 0
-            else:
-                z = np.sqrt(zz)
-                x = xz / z
-                y = yz / z
-        return [angle, x, y, z]  # Return 180 deg rotation
-
-    # As we have reached here there are no singularities so we can handle normally
-    s = np.sqrt(
-        (R[2][1] - R[1][2]) * (R[2][1] - R[1][2])
-        + (R[0][2] - R[2][0]) * (R[0][2] - R[2][0])
-        + (R[1][0] - R[0][1]) * (R[1][0] - R[0][1])
-    )  # used to normalise
-    if abs(s) < 0.001:
-        s = 1
-
-    # Prevent divide by zero, should not happen if matrix is orthogonal and should be
-    # Caught by singularity test above, but I've left it in just in case
-    angle = np.arccos((R[0][0] + R[1][1] + R[2][2] - 1) / 2)
-    x = (R[2][1] - R[1][2]) / s
-    y = (R[0][2] - R[2][0]) / s
-    z = (R[1][0] - R[0][1]) / s
-    return [angle, x, y, z]
-
-
-def switch_one_grasp(boxes_filt, grasp_pose_set):
-    center = boxes_filt.numpy()[:2]
-    centers = boxes_filt.numpy()[:2]
-    center[0] = (centers[1]*0.448)+0.276
-    center[1] = (centers[0]*0.448)-0.224
-    center = np.expand_dims(center, axis=0)
-    grasp_centers = []
-    indexs = []
-    for index, grasp_center in enumerate(grasp_pose_set):
-        if grasp_center[2] < -0.0001:
-            continue
-        else:
-            indexs.append(index)
-            grasp_centers.append(grasp_center[:2])
-    if len(indexs) == 1:
-        g_index = indexs[0]
-        return g_index
-    elif len(indexs) == 0:
-        g_index = 0
-        return g_index
-    else:
-        distances = cdist(center, grasp_centers, metric='euclidean')
-        g_index = np.argmin(distances)
-        g_index = indexs[g_index]
-        return g_index
-
-# def switch_one_grasp1(boxes_filt, grasp_pose_set, depth):
-#     center = boxes_filt.numpy()[:2]
-#     center[0] = (center[0]*0.448)+0.276
-#     center[1] = (center[1]*0.448)-0.224
-#     center = np.expand_dims(center, axis=0)
-#     grasp_centers = []
-#     for grasp_center in grasp_pose_set:
-#         grasp_centers.append(grasp_center[:2])
-#     distances = cdist(center, grasp_centers, metric='euclidean')
-#     index = np.argmin(distances)
-#     return index
-
-# def select_best_grasp(grasp_pose_set, target_point=None, box_filter=None, min_height=0.01):
-#     """
-#     Select the best grasp from a set of grasp poses.
-    
-#     Args:
-#         grasp_pose_set: List of grasp poses [x, y, z, qx, qy, qz, qw]
-#         target_point: Optional target point [x, y, z] to grasp near (if None, uses box_filter)
-#         box_filter: Optional bounding box tensor [center_x, center_y, width, height]
-#         min_height: Minimum height (z) for valid grasps
-        
-#     Returns:
-#         int: Index of the best grasp in grasp_pose_set
-#     """
-#     try:
-#         # Filter grasps by height (z-coordinate)
-#         valid_indices = []
-#         valid_centers = []
-        
-#         for i, grasp in enumerate(grasp_pose_set):
-#             # Check if the grasp is above the minimum height
-#             if grasp[2] >= min_height:
-#                 valid_indices.append(i)
-#                 valid_centers.append(grasp[:2])  # xy coordinates
-        
-#         rospy.loginfo(f"Found {len(valid_indices)} grasps above minimum height {min_height}")
-        
-#         # If no valid grasps, return the first grasp (or None if empty)
-#         if len(valid_indices) == 0:
-#             rospy.logwarn("No grasps above minimum height, returning first grasp")
-#             return 0 if len(grasp_pose_set) > 0 else None
-        
-#         # If only one valid grasp, return it
-#         if len(valid_indices) == 1:
-#             return valid_indices[0]
-        
-#         # Determine target point for distance calculation
-#         if target_point is not None:
-#             # Use provided target point
-#             center = np.array([target_point[0], target_point[1]])
-#         elif box_filter is not None:
-#             # Convert bounding box to world coordinates
-#             if hasattr(box_filter, 'numpy'):
-#                 box = box_filter.numpy()
-#             else:
-#                 box = np.array(box_filter)
-                
-#             # Get camera to world transformation parameters from ROS parameter server
-#             # or use default values similar to your original code
-#             try:
-#                 # Try to get transformation parameters from ROS parameter server
-#                 x_scale = rospy.get_param('~x_scale', 0.448)
-#                 x_offset = rospy.get_param('~x_offset', -0.224)
-#                 y_scale = rospy.get_param('~y_scale', 0.448)
-#                 y_offset = rospy.get_param('~y_offset', 0.276)
-#             except:
-#                 # Use default values
-#                 x_scale, x_offset = 0.448, -0.224
-#                 y_scale, y_offset = 0.448, 0.276
-            
-#             # Transform box center to world coordinates
-#             # Note: Swapping x and y to match your original code's coordinate transformation
-#             center = np.array([
-#                 box[1] * x_scale + x_offset,  # x coordinate
-#                 box[0] * y_scale + y_offset   # y coordinate
-#             ])
-            
-#             rospy.loginfo(f"Box center in image: [{box[0]:.3f}, {box[1]:.3f}]")
-#             rospy.loginfo(f"Box center in world: [{center[0]:.3f}, {center[1]:.3f}]")
-#         else:
-#             # If no target or box provided, use the mean position of all valid grasps
-#             center = np.mean(valid_centers, axis=0)
-#             rospy.loginfo(f"Using mean grasp position: [{center[0]:.3f}, {center[1]:.3f}]")
-        
-#         # Reshape center to 2D array for cdist
-#         center = center.reshape(1, 2)
-        
-#         # Calculate distances from center to each valid grasp
-#         distances = cdist(center, valid_centers, metric='euclidean')
-        
-#         # Find the closest grasp to the center
-#         closest_idx = np.argmin(distances)
-#         best_grasp_idx = valid_indices[closest_idx]
-        
-#         dist = distances[0, closest_idx]
-#         rospy.loginfo(f"Selected grasp {best_grasp_idx} at distance {dist:.3f}m from target")
-        
-#         return best_grasp_idx
-        
-#     except Exception as e:
-#         rospy.logerr(f"Error selecting best grasp: {e}")
-#         import traceback
-#         rospy.logerr(traceback.format_exc())
-#         # Return the first grasp if there's an error
-#         return 0 if len(grasp_pose_set) > 0 else None
-
-def select_best_grasp(grasp_pose_set, grasp_scores, target_point=None, box_filter=None, min_height=0.01):
-    """
-    Select the best grasp from a set of grasp poses based on distance and grasp score.
+    Post-process the aligned point cloud:
+    1. Remove points below the table
+    2. Remove points too far above the table
+    3. Optional voxel downsampling
     
     Args:
-        grasp_pose_set: List of grasp poses [x, y, z, qx, qy, qz, qw]
-        grasp_scores: List of corresponding grasp scores [0, 1]
-        target_point: Optional target point [x, y, z] to grasp near (if None, uses box_filter)
-        box_filter: Optional bounding box tensor [center_x, center_y, width, height]
-        min_height: Minimum height (z) for valid grasps
+        pcd: Open3D point cloud (already aligned)
+        min_height: Minimum height above detected table to keep points
+        max_height: Maximum height above detected table to keep points
+        voxel_size: Voxel size for downsampling (or None for no downsampling)
         
     Returns:
-        int: Index of the best grasp in grasp_pose_set
+        processed_pcd: Post-processed point cloud
     """
-    try:
-        valid_indices = []
-        valid_centers = []
-        valid_scores = []
-        
-        for i, grasp in enumerate(grasp_pose_set):
-            if grasp[2] >= min_height:
-                valid_indices.append(i)
-                valid_centers.append(grasp[:2])  # xy coordinates
-                valid_scores.append(grasp_scores[i])  # corresponding grasp score
-        
-        # If no valid grasps, return the first grasp (or None if empty)
-        if len(valid_indices) == 0:
-            return 0 if len(grasp_pose_set) > 0 else None
-        
-        # If only one valid grasp, return it
-        if len(valid_indices) == 1:
-            return valid_indices[0]
-        
-        # Determine target point for distance calculation
-        if target_point is not None:
-            center = np.array([target_point[0], target_point[1]])
-        elif box_filter is not None:
-            # Convert bounding box to world coordinates
-            center = np.array([
-                box_filter[1] * 848,  # x coordinate
-                box_filter[0] * 480   # y coordinate
-            ])
-        else:
-            center = np.mean(valid_centers, axis=0)
-        
-        # Reshape center to 2D array for cdist
-        center = center.reshape(1, 2)
-        
-        # Calculate distances from center to each valid grasp
-        distances = cdist(center, valid_centers, metric='euclidean')
-        
-        # Combine distance and grasp score (e.g., weighted sum or product)
-        combined_scores = np.array(valid_scores) * np.exp(-distances.flatten())  # Example scoring method
-        
-        # Select the grasp with the highest combined score
-        best_grasp_idx = valid_indices[np.argmax(combined_scores)]
+    if len(pcd.points) == 0:
+        return pcd
+    
+    # Make a copy
+    processed_pcd = copy.deepcopy(pcd)
+    
+    # Get points as numpy array
+    points = np.asarray(processed_pcd.points)
+    
+    # Get colors
+    has_colors = processed_pcd.has_colors()
+    if has_colors:
+        colors = np.asarray(processed_pcd.colors)
+    
+    # Find lowest z-value (approximate table height)
+    z_values = points[:, 2]
+    if len(z_values) == 0:
+        return processed_pcd
+    
+    min_z = np.min(z_values)
+    
+    # Create height mask
+    height_above_table = z_values - min_z
+    height_mask = (height_above_table >= min_height) & (height_above_table <= max_height)
+    
+    # Apply mask to points
+    filtered_points = points[height_mask]
+    
+    # Recreate point cloud
+    filtered_pcd = o3d.geometry.PointCloud()
+    filtered_pcd.points = o3d.utility.Vector3dVector(filtered_points)
+    
+    # Apply mask to colors too if they exist
+    if has_colors:
+        filtered_colors = colors[height_mask]
+        filtered_pcd.colors = o3d.utility.Vector3dVector(filtered_colors)
+    
+    # Apply statistical outlier removal if we have enough points
+    if len(filtered_points) > 100:
+        filtered_pcd, _ = filtered_pcd.remove_statistical_outlier(
+            nb_neighbors=20,
+            std_ratio=2.0
+        )
+    
+    # Optional voxel downsampling
+    if voxel_size is not None and voxel_size > 0 and len(filtered_pcd.points) > 5000:
+        filtered_pcd = filtered_pcd.voxel_down_sample(voxel_size)
+    
+    rospy.loginfo(f"Post-processing: original={len(points)} points, filtered={len(filtered_pcd.points)} points")
+    
+    return filtered_pcd
 
-        dist = distances[0, closest_idx]
-        rospy.loginfo(f"Selected grasp {best_grasp_idx} at distance {dist:.3f}m from target")
+def verify_camera_transform():
+    """
+    Utility function to verify camera transform quality.
+    Useful for diagnosing issues with eye-in-hand calibration.
+    """
+    tfBuffer = tf2_ros.Buffer()
+    listener = tf2_ros.TransformListener(tfBuffer)
+    
+    rospy.loginfo("=== VERIFYING CAMERA TRANSFORM ===")
+    
+    # Get camera to base transform
+    try:
+        transform = tfBuffer.lookup_transform('base_link', 'camera_color_optical_frame', 
+                                             rospy.Time(0), rospy.Duration(5.0))
         
-        return best_grasp_idx
+        # Extract rotation as matrix
+        quat = [transform.transform.rotation.x, transform.transform.rotation.y,
+                transform.transform.rotation.z, transform.transform.rotation.w]
+        r = R.from_quat(quat)
+        rot_matrix = r.as_matrix()
+        
+        # Check camera Z-axis (should point along camera's viewing direction)
+        camera_z = rot_matrix[:, 2]
+        angle_to_down = np.arccos(-camera_z[2]) * 180 / np.pi  # Angle between camera z and world -z
+        
+        rospy.loginfo(f"Camera position: [{transform.transform.translation.x:.3f}, "
+                     f"{transform.transform.translation.y:.3f}, "
+                     f"{transform.transform.translation.z:.3f}]")
+        rospy.loginfo(f"Camera z-axis: [{camera_z[0]:.3f}, {camera_z[1]:.3f}, {camera_z[2]:.3f}]")
+        rospy.loginfo(f"Angle between camera view direction and downward: {angle_to_down:.1f}°")
+        
+        # Print full transformation matrix for debugging
+        T = np.eye(4)
+        T[:3, :3] = rot_matrix
+        T[:3, 3] = [transform.transform.translation.x, 
+                   transform.transform.translation.y, 
+                   transform.transform.translation.z]
+        
+        rospy.loginfo("Full transformation matrix (camera to base):")
+        rospy.loginfo(f"{T[0,0]:.3f} {T[0,1]:.3f} {T[0,2]:.3f} {T[0,3]:.3f}")
+        rospy.loginfo(f"{T[1,0]:.3f} {T[1,1]:.3f} {T[1,2]:.3f} {T[1,3]:.3f}")
+        rospy.loginfo(f"{T[2,0]:.3f} {T[2,1]:.3f} {T[2,2]:.3f} {T[2,3]:.3f}")
+        rospy.loginfo(f"{T[3,0]:.3f} {T[3,1]:.3f} {T[3,2]:.3f} {T[3,3]:.3f}")
+        
+        return T, angle_to_down
+        
+    except (tf2_ros.LookupException, tf2_ros.ConnectivityException, 
+            tf2_ros.ExtrapolationException) as e:
+        rospy.logerr(f"Transform verification failed: {e}")
+        return None, None
+
+def orient_pointcloud_back_to_world(pcd, transformation_matrix):
+    """
+    Reverts the oriented point cloud back to world coordinates.
+    
+    Args:
+        pcd: Open3D point cloud that has been oriented for grasping
+        transformation_matrix: Transformation matrix that was used to orient the point cloud
+    
+    Returns:
+        Reoriented point cloud in world coordinates
+    """
+    # Compute the inverse of the transformation matrix
+    inverse_transform = np.linalg.inv(transformation_matrix)
+    
+    # Apply the inverse transformation to revert the point cloud back to world coordinates
+    pcd.transform(inverse_transform)
+    
+    return pcd
+
+def detect_and_correct_orientation(pcd, method='pca'):
+    """
+    Detect the orientation of the point cloud and correct it to face upward.
+    
+    Args:
+        pcd: Open3D point cloud
+        method: 'pca' for PCA-based, 'ransac' for plane-fitting based
+    Returns:
+        corrected_pcd: Reoriented point cloud
+        transform: Applied transformation matrix
+    """
+    corrected_pcd = copy.deepcopy(pcd)
+    
+    if method == 'pca':
+        # Use PCA to find the principal axes
+        points = np.asarray(corrected_pcd.points)
+        centroid = np.mean(points, axis=0)
+        points_centered = points - centroid
+        
+        # Compute covariance matrix and eigenvalues/eigenvectors
+        cov = np.cov(points_centered.T)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        
+        # Sort eigenvectors by eigenvalues (largest to smallest)
+        idx = eigenvalues.argsort()[::-1]
+        eigenvectors = eigenvectors[:, idx]
+        
+        # The smallest eigenvector is often the "up" direction for flat objects
+        # We want this to align with the Z-axis
+        up_vector = eigenvectors[:, 2]
+        
+        # If the up vector points downward, flip it
+        if up_vector[2] < 0:
+            up_vector = -up_vector
+        
+        # Create rotation matrix to align up_vector with Z-axis
+        z_axis = np.array([0, 0, 1])
+        v = np.cross(up_vector, z_axis)
+        s = np.linalg.norm(v)
+        c = np.dot(up_vector, z_axis)
+        
+        if s < 1e-6:  # Vectors are already aligned
+            rotation = np.eye(3)
+        else:
+            vx = np.array([[0, -v[2], v[1]],
+                          [v[2], 0, -v[0]],
+                          [-v[1], v[0], 0]])
+            rotation = np.eye(3) + vx + np.dot(vx, vx) * ((1 - c) / (s * s))
+        
+        # Create transformation matrix
+        transform = np.eye(4)
+        transform[:3, :3] = rotation
+        transform[:3, 3] = -np.dot(rotation, centroid) + centroid
+        
+    elif method == 'ransac':
+        # Use RANSAC to fit a plane and align the object
+        plane_model, inliers = corrected_pcd.segment_plane(
+            distance_threshold=0.01,
+            ransac_n=3,
+            num_iterations=1000
+        )
+        
+        # Extract plane normal
+        normal = np.array(plane_model[:3])
+        
+        # Ensure normal points upward
+        if normal[2] < 0:
+            normal = -normal
+        
+        # Create rotation matrix to align normal with Z-axis
+        z_axis = np.array([0, 0, 1])
+        v = np.cross(normal, z_axis)
+        s = np.linalg.norm(v)
+        c = np.dot(normal, z_axis)
+        
+        if s < 1e-6:  # Vectors are already aligned
+            rotation = np.eye(3)
+        else:
+            vx = np.array([[0, -v[2], v[1]],
+                          [v[2], 0, -v[0]],
+                          [-v[1], v[0], 0]])
+            rotation = np.eye(3) + vx + np.dot(vx, vx) * ((1 - c) / (s * s))
+        
+        # Create transformation matrix
+        transform = np.eye(4)
+        transform[:3, :3] = rotation
+        
+        # Center the point cloud
+        points = np.asarray(corrected_pcd.points)
+        centroid = np.mean(points, axis=0)
+        transform[:3, 3] = -np.dot(rotation, centroid) + centroid
+    
+    # Apply transformation
+    corrected_pcd.transform(transform)
+    
+    return corrected_pcd, transform
+
+
+def detect_object_top_surface(pcd, percentile=90):
+    """
+    Detect the top surface of an object by analyzing point distribution.
+    
+    Args:
+        pcd: Open3D point cloud
+        percentile: Percentile of points to consider as "top"
+    Returns:
+        top_normal: Normal vector of the top surface
+    """
+    points = np.asarray(pcd.points)
+    normals = np.asarray(pcd.normals)
+    
+    # Find points in the top percentile by Z coordinate
+    z_threshold = np.percentile(points[:, 2], percentile)
+    top_indices = points[:, 2] >= z_threshold
+    
+    if np.sum(top_indices) < 10:
+        # Fallback to simpler method
+        return np.array([0, 0, 1])
+    
+    # Average the normals of top points
+    top_normals = normals[top_indices]
+    avg_normal = np.mean(top_normals, axis=0)
+    avg_normal = avg_normal / np.linalg.norm(avg_normal)
+    
+    # Ensure it points upward
+    if avg_normal[2] < 0:
+        avg_normal = -avg_normal
+    
+    return avg_normal
+
+
+# def orient_for_top_grasping(pcd, debug=False):
+#     """
+#     Enhanced version of orient_for_top_grasping specifically for eye-in-hand setups.
+    
+#     Args:
+#         pcd: Open3D point cloud
+#         debug: If True, visualize the orientation process
+#     Returns:
+#         oriented_pcd: Properly oriented point cloud
+#         transform: Applied transformation
+#     """
+#     # Start with basic orientation correction
+#     oriented_pcd, transform1 = detect_and_correct_orientation(pcd, method='pca')
+    
+#     # Try to detect table plane
+#     plane_model, inliers, success = detect_table_plane(oriented_pcd)
+    
+#     if success:
+#         # Use detected plane for final alignment
+#         aligned_pcd, table_transform, _ = align_to_table_plane(oriented_pcd, plane_model)
+#         transform = table_transform @ transform1
+#         oriented_pcd = aligned_pcd
+#     else:
+#         # Fall back to original method if plane detection fails
+#         oriented_pcd.estimate_normals()
+#         top_normal = detect_object_top_surface(oriented_pcd)
+        
+#         # Fine-tune orientation based on top surface normal
+#         z_axis = np.array([0, 0, 1])
+#         angle = np.arccos(np.clip(np.dot(top_normal, z_axis), -1, 1))
+        
+#         if angle > np.radians(10):  # If deviation is significant
+#             # Compute rotation axis
+#             rotation_axis = np.cross(top_normal, z_axis)
+#             rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
+            
+#             # Create rotation matrix using Rodrigues' formula
+#             K = np.array([
+#                 [0, -rotation_axis[2], rotation_axis[1]],
+#                 [rotation_axis[2], 0, -rotation_axis[0]],
+#                 [-rotation_axis[1], rotation_axis[0], 0]
+#             ])
+            
+#             rotation = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * np.dot(K, K)
+            
+#             # Apply fine-tuning transformation
+#             transform2 = np.eye(4)
+#             transform2[:3, :3] = rotation
+            
+#             oriented_pcd.transform(transform2)
+#             transform = transform2 @ transform1
+#         else:
+#             transform = transform1
+    
+#     # Ensure the object is centered and sitting on a plane
+#     points = np.asarray(oriented_pcd.points)
+#     min_z = np.min(points[:, 2])
+#     centroid = np.mean(points, axis=0)
+    
+#     # Translate to center horizontally and place on ground plane
+#     translation = np.eye(4)
+#     translation[:3, 3] = [-centroid[0], -centroid[1], -min_z]
+    
+#     oriented_pcd.transform(translation)
+#     transform = translation @ transform
+    
+#     if debug:
+#         # Visualize the orientation process
+#         coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+#         o3d.visualization.draw_geometries(
+#             [oriented_pcd, coord_frame],
+#             window_name="Oriented Point Cloud for Top Grasping"
+#         )
+    
+#     return oriented_pcd, transform
+
+def orient_for_top_grasping(pcd, debug=False):
+    """
+    Correct the orientation of the object without changing its position.
+    The object will be aligned upright but stay in the same world position.
+    
+    Args:
+        pcd: Open3D point cloud of the object
+        debug: If True, visualize the orientation process
+    Returns:
+        oriented_pcd: Properly oriented point cloud, same position
+        transform: Applied transformation matrix (rotation only)
+    """
+    # Step 1: Initial orientation correction (using PCA or RANSAC)
+    oriented_pcd, transform1 = detect_and_correct_orientation(pcd, method='pca')
+
+    # Step 2: Detect the object’s top surface normal (the upward direction)
+    oriented_pcd.estimate_normals()
+    top_normal = detect_object_top_surface(oriented_pcd)
+    
+    # Step 3: Fine-tune orientation based on top surface normal
+    z_axis = np.array([0, 0, 1])  # World 'up' direction
+
+    # Calculate the angle between the current top normal and the desired vertical direction
+    angle = np.arccos(np.clip(np.dot(top_normal, z_axis), -1, 1))
+
+    if angle > np.radians(10):  # If the object is tilted significantly
+        # Compute the rotation axis to align the top normal with the Z-axis
+        rotation_axis = np.cross(top_normal, z_axis)
+        rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
+
+        # Create a rotation matrix using Rodrigues' rotation formula
+        K = np.array([
+            [0, -rotation_axis[2], rotation_axis[1]],
+            [rotation_axis[2], 0, -rotation_axis[0]],
+            [-rotation_axis[1], rotation_axis[0], 0]
+        ])
+
+        # Final rotation matrix
+        rotation = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * np.dot(K, K)
+        
+        # Apply the rotation to the object, but **do not translate it**
+        transform2 = np.eye(4)
+        transform2[:3, :3] = rotation
+        
+        # Apply rotation without changing the position of the object
+        oriented_pcd.transform(transform2)
+        transform = transform2 @ transform1
+    else:
+        # No rotation needed if angle is small (within 10 degrees)
+        transform = transform1
+    
+    # Step 4: Visualize (optional)
+    if debug:
+        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+        o3d.visualization.draw_geometries(
+            [oriented_pcd, coord_frame],
+            window_name="Oriented Point Cloud for Top Grasping"
+        )
+    
+    return oriented_pcd, transform
+
+def detect_table_plane(pcd, distance_threshold=0.01, min_points=500):
+    """
+    Detect the table plane in a point cloud using RANSAC
+    
+    Args:
+        pcd: Open3D point cloud
+        distance_threshold: RANSAC distance threshold
+        min_points: Minimum number of points for valid plane
+        
+    Returns:
+        plane_model: (a, b, c, d) plane equation
+        inliers: Indices of inlier points
+        success: Whether plane detection was successful
+    """
+    if len(pcd.points) < min_points:
+        return None, None, False
+    
+    # Make a copy to avoid modifying original
+    pcd_copy = copy.deepcopy(pcd)
+    
+    # Estimate normals if they don't exist
+    if not pcd_copy.has_normals():
+        pcd_copy.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(
+            radius=0.1, max_nn=30))
+    
+    # Use RANSAC to find dominant plane
+    try:
+        plane_model, inliers = pcd_copy.segment_plane(
+            distance_threshold=distance_threshold,
+            ransac_n=3,
+            num_iterations=1000
+        )
+        
+        # Check if we have enough inliers
+        if len(inliers) < min_points:
+            rospy.logwarn(f"Not enough inliers for plane: {len(inliers)} < {min_points}")
+            return plane_model, inliers, False
+        
+        # Verify plane is roughly horizontal (normal pointing up)
+        a, b, c, d = plane_model
+        normal = np.array([a, b, c])
+        
+        # Angle between normal and vertical
+        angle_with_vertical = np.arccos(np.abs(normal[2])) * 180 / np.pi
+        
+        if angle_with_vertical > 25:  # More than 25° from vertical
+            rospy.logwarn(f"Detected plane is not horizontal: {angle_with_vertical:.1f}° from vertical")
+            rospy.logwarn(f"Normal: [{a:.3f}, {b:.3f}, {c:.3f}]")
+            return plane_model, inliers, False
+        
+        # Success
+        return plane_model, inliers, True
         
     except Exception as e:
-        print(f"Error selecting best grasp: {e}")
-        return 0 if len(grasp_pose_set) > 0 else None
+        rospy.logerr(f"Plane detection failed: {e}")
+        return None, None, False
 
-def select_numbers(lst, threshold, max_above_threshold, total_count):
-
-    above_threshold = [x for x in lst if x > threshold]
-    below_threshold = [x for x in lst if x <= threshold]
-
-    if len(below_threshold) + max_above_threshold < total_count or len(lst) < total_count:
-        raise ValueError("Not enough elements to satisfy the criteria.")
-
-    selected_above = random.sample(above_threshold, min(len(above_threshold), max_above_threshold))
-    remaining_count = total_count - len(selected_above)
-    selected_below = random.sample(below_threshold, remaining_count)
-    result = selected_above + selected_below
-    random.shuffle(result)
-
-    return result
-
+def align_to_table_plane(pcd, plane_model=None, distance_threshold=0.01, visualize=False):
+    """
+    Align point cloud to make table plane horizontal
+    
+    Args:
+        pcd: Open3D point cloud
+        plane_model: Optional pre-computed plane model. If None, will be detected
+        distance_threshold: RANSAC threshold for plane detection
+        visualize: If True, visualize before and after alignment
+        
+    Returns:
+        aligned_pcd: Point cloud aligned to table
+        transform: Applied transformation
+        success: Whether alignment was successful
+    """
+    # Make a copy of the point cloud
+    aligned_pcd = copy.deepcopy(pcd)
+    
+    # Detect plane if not provided
+    if plane_model is None:
+        plane_model, inliers, success = detect_table_plane(aligned_pcd, distance_threshold)
+        if not success:
+            rospy.logwarn("Could not detect stable table plane. Skipping alignment.")
+            return aligned_pcd, np.eye(4), False
+    
+    # Extract table normal (a, b, c from ax + by + cz + d = 0)
+    a, b, c, d = plane_model
+    table_normal = np.array([a, b, c])
+    
+    # Make sure normal points upward (positive z)
+    if table_normal[2] < 0:
+        table_normal = -table_normal
+        d = -d
+    
+    # Normalize the normal vector
+    table_normal = table_normal / np.linalg.norm(table_normal)
+    
+    # Create rotation to align table normal with z-axis [0,0,1]
+    z_axis = np.array([0, 0, 1])
+    
+    # Compute angle between normals
+    dot_product = np.dot(table_normal, z_axis)
+    angle = np.arccos(np.clip(dot_product, -1.0, 1.0))
+    
+    # If normals are already aligned (within 1 degree), no rotation needed
+    if angle < np.radians(1.0):
+        rospy.loginfo("Table already horizontal (within 1°). No alignment needed.")
+        return aligned_pcd, np.eye(4), True
+    
+    # Compute rotation axis (cross product)
+    rotation_axis = np.cross(table_normal, z_axis)
+    
+    # Handle case when vectors are parallel or anti-parallel
+    if np.linalg.norm(rotation_axis) < 1e-6:
+        if dot_product > 0:  # Already aligned
+            return aligned_pcd, np.eye(4), True
+        else:  # Anti-parallel, rotate around x-axis
+            rotation_axis = np.array([1, 0, 0])
+    else:
+        rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
+    
+    # Create rotation matrix (Rodrigues' formula)
+    K = np.array([
+        [0, -rotation_axis[2], rotation_axis[1]],
+        [rotation_axis[2], 0, -rotation_axis[0]],
+        [-rotation_axis[1], rotation_axis[0], 0]
+    ])
+    
+    rotation = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * np.dot(K, K)
+    
+    # Get centroid of point cloud
+    points = np.asarray(aligned_pcd.points)
+    centroid = np.mean(points, axis=0)
+    
+    # Create full transformation matrix
+    transform = np.eye(4)
+    transform[:3, :3] = rotation
+    
+    # Apply rotation around centroid
+    transform[:3, 3] = centroid - np.dot(rotation, centroid)
+    
+    # Apply transformation
+    aligned_pcd.transform(transform)
+    
+    # Optional: visualize before and after
+    if visualize:
+        # Create coordinate frames
+        original_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+        aligned_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+        
+        # Show original
+        o3d.visualization.draw_geometries([pcd, original_frame], "Original Point Cloud")
+        
+        # Show aligned
+        o3d.visualization.draw_geometries([aligned_pcd, aligned_frame], "Aligned Point Cloud")
+    
+    # Verify the alignment result
+    new_plane_model, new_inliers, new_success = detect_table_plane(aligned_pcd, distance_threshold)
+    if new_success:
+        new_normal = np.array(new_plane_model[:3])
+        new_normal = new_normal / np.linalg.norm(new_normal)
+        new_angle = np.arccos(np.abs(new_normal[2])) * 180 / np.pi
+        rospy.loginfo(f"After alignment: table normal = [{new_normal[0]:.3f}, {new_normal[1]:.3f}, {new_normal[2]:.3f}]")
+        rospy.loginfo(f"After alignment: angle with vertical = {new_angle:.2f}°")
+    
+    return aligned_pcd, transform, True
