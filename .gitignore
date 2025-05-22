@@ -16,7 +16,7 @@ train_result
 ovgrasping
 
 tolerance
-log_rs
+logs_rs
 build
 dist
 weights

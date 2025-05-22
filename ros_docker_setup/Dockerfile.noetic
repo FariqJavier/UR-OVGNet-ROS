@@ -112,7 +112,7 @@ RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/ \
 RUN cd /home/$USERNAME/catkin_ws/src/OVGNet/groundingdino \
     && pip3 install -e .
 
-RUN cd /home/$USERNAME/catkin_ws/src/groundingdino-ros/src/groundingdino \
+RUN cd /home/$USERNAME/catkin_ws/src/groundingdino-ros/src/ \
     && pip3 install -e .
 
 # Install necessary graspnet model dependency
