@@ -296,7 +296,7 @@ def get_color_and_depth_image(
         try:
             # Wait for transform to be available
             rospy.loginfo("Waiting for camera transform...")
-            transform = tfBuffer.lookup_transform('base_link', 'camera_color_optical_frame', rospy.Time(0), rospy.Duration(5.0))
+            transform = tfBuffer.lookup_transform('base_link', 'camera_depth_optical_frame', rospy.Time(0), rospy.Duration(5.0))
             
             # Debug the transform
             rospy.loginfo(f"Camera frame: {transform.child_frame_id}")
