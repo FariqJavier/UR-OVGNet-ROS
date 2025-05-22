@@ -859,10 +859,10 @@ def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_i
             z_values = filtered_points[:, 2]
             
             rospy.loginfo(f"Camera {camera_id} - Filtered points stats:")
-            rospy.loginfo(f"X: max={np.max(x_values):.3f}, min={np.min(x_values):.3f}, mean={np.mean(x_values):.3f}")
-            rospy.loginfo(f"Y: max={np.max(y_values):.3f}, min={np.min(y_values):.3f}, mean={np.mean(y_values):.3f}")
-            rospy.loginfo(f"Z: max={np.max(z_values):.3f}, min={np.min(z_values):.3f}, mean={np.mean(z_values):.3f}")
-            rospy.loginfo(f"Total valid points: {len(filtered_points)}")
+            rospy.loginfo(f"Camera {camera_id} - X: max={np.max(x_values):.3f}, min={np.min(x_values):.3f}, mean={np.mean(x_values):.3f}")
+            rospy.loginfo(f"Camera {camera_id} - Y: max={np.max(y_values):.3f}, min={np.min(y_values):.3f}, mean={np.mean(y_values):.3f}")
+            rospy.loginfo(f"Camera {camera_id} - Z: max={np.max(z_values):.3f}, min={np.min(z_values):.3f}, mean={np.mean(z_values):.3f}")
+            rospy.loginfo(f"TCamera {camera_id} - otal valid points: {len(filtered_points)}")
             
             # Create point cloud
             pcd = o3d.geometry.PointCloud()
