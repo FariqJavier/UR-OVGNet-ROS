@@ -193,6 +193,41 @@ def get_graspnet_inference (
             frame_id=frame_id
         )
 
+        # Log statistics
+        # Get the axis-aligned bounding box (AABB) of the point cloud
+        min_bound = fused_pcd_canonical.get_min_bound()
+        max_bound = fused_pcd_canonical.get_max_bound()
+        min_x, min_y, min_z = min_bound
+        max_x, max_y, max_z = max_bound
+
+        # Extract point cloud data
+        points = np.asarray(fused_pcd_canonical.points)
+            
+        # Compute the mean for x, y, z coordinates
+        mean_x = np.mean(points[:, 0])
+        mean_y = np.mean(points[:, 1])
+        mean_z = np.mean(points[:, 2])
+
+        # Print the min, max, and mean values for X, Y, Z
+        rospy.loginfo(f"Bounding Box:")
+        rospy.loginfo(f"Min Bound: X={min_bound[0]}, Y={min_bound[1]}, Z={min_bound[2]}")
+        rospy.loginfo(f"Max Bound: X={max_bound[0]}, Y={max_bound[1]}, Z={max_bound[2]}")
+        rospy.loginfo(f"Mean: X={mean_x:.3f}, Y={mean_y:.3f}, Z={mean_z:.3f}")
+
+        # Create a dictionary with statistics
+        pcd_canonical_stats = {
+            "min": {"x": min_x, "y": min_y, "z": min_z},
+            "max": {"x": max_x, "y": max_y, "z": max_z},
+            "mean": {"x": mean_x, "y": mean_y, "z": mean_z}
+        }
+
+        # Save the statistics to the JSON file
+        output_json_path = os.path.join(output_dir, "point_cloud_statistics.json")
+        with open(output_json_path, 'w') as f:
+            json.dump(pcd_canonical_stats, f, indent=2)
+
+        rospy.loginfo(f"Point cloud statistics saved to: {output_json_path}")
+
         # # Visualize the fused point cloud
         # o3d.visualization.draw_geometries([fuse_pcd])
 
@@ -560,7 +595,7 @@ def create_pose_msg(
         
         pose_stamped.pose.position.x = position[0]
         pose_stamped.pose.position.y = position[1]
-        pose_stamped.pose.position.z = position[2]
+        pose_stamped.pose.position.z = position[2] + 0.18
         
         pose_stamped.pose.orientation.x = quat[0]
         pose_stamped.pose.orientation.y = quat[1]
@@ -571,7 +606,7 @@ def create_pose_msg(
         # Input is [x, y, z, qx, qy, qz, qw]
         pose_stamped.pose.position.x = float(grasp_pose[0])
         pose_stamped.pose.position.y = float(grasp_pose[1])
-        pose_stamped.pose.position.z = float(grasp_pose[2])
+        pose_stamped.pose.position.z = float(grasp_pose[2]) + 0.18
         
         pose_stamped.pose.orientation.x = float(grasp_pose[3])
         pose_stamped.pose.orientation.y = float(grasp_pose[4])

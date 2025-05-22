@@ -18,7 +18,7 @@
     <param name="groundingdino_text_threshold" value="0.25"/>
     <!-- <param name="groundingdino_token_spans" value="None"/> -->
     <param name="groundingdino_cpu_only" value="False"/>
-    <param name="graspnet_checkpoint_path" value="$(find graspnet-ros)/src/logs/log_rs/checkpoint.tar"/>
+    <param name="graspnet_checkpoint_path" value="$(find graspnet-ros)/src/logs/logs_rs/checkpoint.tar"/>
     <param name="grapnet_refine_approach_dist" value="0.01"/>
     <param name="graspnet_dist_thresh" value="0.05"/>
     <param name="graspnet_angle_thresh" value="10"/>
