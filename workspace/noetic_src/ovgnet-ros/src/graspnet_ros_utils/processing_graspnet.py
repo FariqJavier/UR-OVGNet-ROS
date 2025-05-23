@@ -882,7 +882,7 @@ def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_i
                 rospy.loginfo(f"Camera {camera_id} - After downsampling: {len(pcd.points)} points (removed {original_count - len(pcd.points)})")
             
             # FIX 11: Ensure we still have a reasonable number of points
-            if len(pcd.points) < 100:
+            if len(pcd.points) < 5000:
                 rospy.logwarn(f"Camera {camera_id} - Too few points after processing: {len(pcd.points)}")
                 continue
 
