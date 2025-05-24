@@ -17,9 +17,9 @@ import copy
 import tf2_ros
 
 reconstruction_config = {
-    'nb_neighbors': 60,        # Increased from 50
-    'std_ratio': 1.5,          # Decreased from 2.0
-    'voxel_size': 0.005,       # Keep as is
+    'nb_neighbors': 20,        # Increased from 50
+    'std_ratio': 2.0,          # Decreased from 2.0
+    'voxel_size': 0.01,       # Keep as is
     'icp_max_try': 5,          # Keep as is
     'icp_max_iter': 2000,      # Keep as is
     'translation_thresh': 3.95, # Keep as is
@@ -36,7 +36,9 @@ reconstruction_config = {
     'visualize_final': True,           # Set to True for debugging
     'min_object_height': 0.005,         # Min height above table
     'max_object_height': 0.5,           # Max height above table
-    'final_voxel_size': 0.002           # Final voxel size for downsampling
+    'fuse_nb_neighbors': 60,        # Increased from 50
+    'fuse_std_ratio': 2.0,          # Decreased from 2.0
+    'fuse_voxel_size': 0.005           # Final voxel size for downsampling
 }
 
 graspnet_config = {
@@ -161,8 +163,8 @@ def process_pcds(pcds, reconstruction_config):
         )
         
         # Apply voxel downsampling
-        if reconstruction_config.get('voxel_size') and len(pcd_copy.points) > 0:
-            pcd_copy = pcd_copy.voxel_down_sample(reconstruction_config['voxel_size'])
+        if reconstruction_config.get('fuse_voxel_size') and len(pcd_copy.points) > 0:
+            pcd_copy = pcd_copy.voxel_down_sample(reconstruction_config['fuse_voxel_size'])
         
         if len(pcd_copy.points) > 50:
             processed_pcds.append(pcd_copy)
@@ -179,7 +181,7 @@ def process_pcds(pcds, reconstruction_config):
     fused_pcd = copy.deepcopy(target_pcd)
     transformations = {ref_idx: np.eye(4)}
     
-    voxel_size = reconstruction_config.get('voxel_size', 0.005)
+    voxel_size = reconstruction_config.get('fuse_voxel_size', 0.005)
     
     # Compute FPFH features for target
     target_down = target_pcd.voxel_down_sample(voxel_size * 3)
@@ -350,8 +352,8 @@ def process_pcds(pcds, reconstruction_config):
     # Remove outliers from the final point cloud
     if len(fused_pcd.points) > 200:
         fused_pcd, _ = fused_pcd.remove_statistical_outlier(
-            nb_neighbors=reconstruction_config.get('nb_neighbors', 50),
-            std_ratio=reconstruction_config.get('std_ratio', 2.0)
+            nb_neighbors=reconstruction_config.get('fuse_nb_neighbors', 50),
+            std_ratio=reconstruction_config.get('fuse_std_ratio', 2.0)
         )
          # Add radius outlier removal as well
         fused_pcd, _ = fused_pcd.remove_radius_outlier(
@@ -381,8 +383,8 @@ def process_pcds(pcds, reconstruction_config):
         fused_pcd = pcd_from_mesh
     
     # Final voxel downsampling to unify point density
-    if reconstruction_config.get('voxel_size') and len(fused_pcd.points) > 30000:
-        fused_pcd = fused_pcd.voxel_down_sample(reconstruction_config['voxel_size'])
+    if reconstruction_config.get('fuse_voxel_size') and len(fused_pcd.points) > 30000:
+        fused_pcd = fused_pcd.voxel_down_sample(reconstruction_config['fuse_voxel_size'])
     
     # Ensure normals for the final result
     fused_pcd.estimate_normals()
