@@ -246,7 +246,8 @@ def get_graspnet_inference (
             fused_pcd_canonical, 
             fused_trans_canonical,
             get_visual=True, 
-            top_down_only=True
+            top_down_only=True,
+            simple_orientation=False
         )
 
         # Save grasp data as JSON

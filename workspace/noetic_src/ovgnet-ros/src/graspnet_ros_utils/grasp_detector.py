@@ -31,14 +31,21 @@ class Graspnet:
         grasp_pcd = copy.deepcopy(full_pcd)
         grasp_pcd.points = o3d.utility.Vector3dVector(-points)
 
-        # generating grasp poses.
         gg = self.graspnet_baseline.inference(grasp_pcd)
-        gg.translations = -gg.translations
-        gg.rotation_matrices = -gg.rotation_matrices
-        gg.translations = gg.translations + gg.rotation_matrices[:, :, 0] * self.refine_approach_dist
-        gg = self.graspnet_baseline.collision_detection(gg, points)
+        if len(gg) == 0: # Early exit if no grasps from inference
+            return gg
 
-        # all the returned result in 'world' frame. 'gg' using 'graspnet' gripper frame.
+        gg.translations = -gg.translations
+        gg.rotation_matrices = -gg.rotation_matrices # Still suspicious but keeping as per original
+
+        if self.refine_approach_dist != 0.0:
+             # Ensure gg.rotation_matrices is (N,3,3) for this broadcasting
+             if gg.rotation_matrices.ndim == 3 and gg.rotation_matrices.shape[1:3] == (3,3):
+                gg.translations = gg.translations + gg.rotation_matrices[:, :, 0] * self.refine_approach_dist
+             else:
+                 print(f"Warning: Unexpected shape for gg.rotation_matrices: {gg.rotation_matrices.shape}. Skipping refine_approach_dist.")
+
+        gg = self.graspnet_baseline.collision_detection(gg, points)
         return gg
 
     def assign_grasp_pose(self, gg, object_poses):
@@ -134,10 +141,10 @@ class Graspnet:
                     
         return grasp_pose_set, grasp_poses, remain_gg
 
-    def filter_grasps_pose(self, gg, min_score=0.15, top_down_only=True):
-        """Filter grasps by score, distance, angle, and optionally top-down approach"""
+    def filter_grasps_pose(self, gg, min_score=0.25, top_down_only=True):
+        """Filter grasps by score, angle, and optionally top-down approach"""
         
-        # Filter by score
+        # Filter by score (removing low-score grasps)
         del_index = []
         for index, value in enumerate(gg):
             if value.score < min_score:
@@ -150,119 +157,41 @@ class Graspnet:
         # Get translations, rotations, and scores
         ts = gg.translations
         rs = gg.rotation_matrices
-        depths = gg.depths
         scores = gg.scores
         
-        # Move centers to the eelink frame
-        ts = ts + rs[:,:,0] * (np.vstack((depths, depths, depths)).T)
-        
-        # Convert to eelink rotation matrices
-        eelink_rs = np.zeros(shape=(len(rs), 3, 3), dtype=np.float32)
-        eelink_rs[:,:,0] = rs[:,:,2]   # Approach direction 
-        eelink_rs[:,:,1] = -rs[:,:,1]  # Gripper y-axis
-        eelink_rs[:,:,2] = rs[:,:,0]   # Gripper z-axis
-
         # Initialize a mask for filtering
         combined_mask = np.ones(len(rs), dtype=bool)
-
-        if self.refine_approach_dist is not None:
-            # Apply refine_approach_dist filtering by checking the approach direction and depth
-            depth_mask = (depths > self.refine_approach_dist)
-            combined_mask &= depth_mask
-            rospy.loginfo(f"Filtered by refine_approach_dist: kept {np.sum(depth_mask)} grasps.")
-
-        if self.dist_thresh is not None:
-            # Apply distance threshold filtering based on distance to the object center
-            min_dists = np.linalg.norm(ts - np.mean(ts, axis=0), axis=1)
-            dist_mask = min_dists < self.dist_thresh
-            combined_mask &= dist_mask
-            rospy.loginfo(f"Filtered by dist_thresh: kept {np.sum(dist_mask)} grasps.")
-
-        if self.angle_thresh is not None:
-            # Calculate angles between approach direction and vertical (in degrees)
-            approach_angles = np.arccos(-rs[:, 2, 0]) * 180.0 / np.pi
-            angle_mask = approach_angles < self.angle_thresh
-            combined_mask &= angle_mask
-            rospy.loginfo(f"Filtered by angle_thresh (<{self.angle_thresh}°): kept {np.sum(angle_mask)} grasps.")
-            if np.sum(angle_mask) > 0:  # Only try to get min/max if we have values
-                rospy.loginfo(f"Angle range of kept grasps: {np.min(approach_angles[angle_mask]):.1f}° to {np.max(approach_angles[angle_mask]):.1f}°")
-            else:
-                rospy.loginfo("No grasps within the angle threshold.")
-
+        
+        # Filter for top-down grasping (approach from above)
         if top_down_only:
-            # Stricter filtering for top-down grasps (approach from above)
-            top_down_angle_thresh = min(self.angle_thresh, 45) # degrees (adjust as needed)
+            top_down_angle_thresh = self.angle_thresh  # Max allowed angle from vertical
             approach_vectors = rs[:, :, 0]  # Approach direction in graspnet frame
-            # Calculate the angle between approach vector and negative Z-axis (in degrees)
-            # A perfect top-down grasp would have angle = 0
-            # approach_from_above_mask = approach_vectors[:, 2] < -0.8  # z-component should be negative
+            # Calculate the angle between approach vector and the negative Z-axis (in degrees)
             approach_angles = np.arccos(-approach_vectors[:, 2]) * 180.0 / np.pi
+            # Mask for top-down approach
             approach_from_above_mask = approach_angles < top_down_angle_thresh
             combined_mask &= approach_from_above_mask
             rospy.loginfo(f"Filtered for top-down approach: kept {np.sum(approach_from_above_mask)} grasps.")
 
             if np.sum(combined_mask) < 1:
-                rospy.logwarn("No top-down grasps found. Using best available grasps...")
-                # Fall back to best angle grasps
-                # angles = np.arccos(-rs[:, 2, 0]) * 180.0 / np.pi
-                # sorted_indices = np.argsort(angles)
+                rospy.logwarn("No top-down grasps found. Returning best available grasps.")
                 sorted_indices = np.argsort(approach_angles)
-                num_grasps = min(10, len(gg))
+                num_grasps = min(10, len(gg))  # Take the best 10 grasps
                 filtered_gg = gg[sorted_indices[:num_grasps]]
-                return filtered_gg, eelink_rs[sorted_indices[:num_grasps]]
-            else:
-                # # Use grasps that pass all the filters
-                # filtered_gg = gg[combined_mask]
-                # sorted_indices = np.argsort(-scores[combined_mask])
-                # num_grasps = min(20, len(filtered_gg))
-                # filtered_gg = filtered_gg[sorted_indices[:num_grasps]]
-                # return filtered_gg, eelink_rs[combined_mask][sorted_indices[:num_grasps]]
+                return filtered_gg, rs[sorted_indices[:num_grasps]]
+                # return [], []
 
-                # Use grasps that pass all the filters
-                filtered_gg = gg[combined_mask]
-                
-                # Calculate combined scores that prioritize top-down grasps
-                top_down_scores = 1.0 - (approach_angles[combined_mask] / top_down_angle_thresh)
-                
-                # Weight between original grasp score and top-down score
-                # Adjust these weights to balance grasp quality vs. top-down preference
-                original_weight = 0.3
-                top_down_weight = 0.7
-                
-                # Calculate combined scores (higher is better)
-                combined_scores = (original_weight * scores[combined_mask]) + \
-                                (top_down_weight * top_down_scores)
-                
-                # Sort by combined score
-                sorted_indices = np.argsort(-combined_scores)
-                num_grasps = min(20, len(filtered_gg))
-                filtered_gg = filtered_gg[sorted_indices[:num_grasps]]
-                
-                # Log the selected grasps for debugging
-                rospy.loginfo(f"Selected {len(filtered_gg)} grasps with top-down priority")
-                if len(filtered_gg) > 0:
-                    best_angle = approach_angles[combined_mask][sorted_indices[0]]
-                    best_score = scores[combined_mask][sorted_indices[0]]
-                    rospy.loginfo(f"Best grasp: angle = {best_angle:.2f}°, original score = {best_score:.2f}")
-                
-                return filtered_gg, eelink_rs[combined_mask][sorted_indices[:num_grasps]]
-        else:
-            # For taller objects, allow side grasps but prefer grasps on the object body, not edges
-            # Filter by score first
-            sorted_indices = np.argsort(-scores)
-            num_grasps = min(30, len(gg))  # Keep more candidates for tall objects
-            filtered_gg = gg[sorted_indices[:num_grasps]]
-            
-            # Allow wider range of approach angles but avoid extreme angles
-            approach_vectors = rs[sorted_indices[:num_grasps], :, 0]
-            approach_angles = np.arccos(np.abs(approach_vectors[:, 2])) * 180.0 / np.pi
-            
-            # Sort by a combination of grasp score and reasonable approach angle
-            combined_scores = scores[sorted_indices[:num_grasps]] * (1.0 - approach_angles/90.0)
-            final_indices = np.argsort(-combined_scores)
-            
-            final_gg = filtered_gg[final_indices]
-            return final_gg, eelink_rs[sorted_indices[:num_grasps]][final_indices]
+        # Final filtered grasps based on the combined mask
+        filtered_gg = gg[combined_mask]
+        
+        # Calculate the angles for logging purposes
+        approach_angles = np.arccos(-rs[:, 2, 0]) * 180.0 / np.pi
+        
+        # Log the range of approach angles for the selected grasps
+        if np.sum(combined_mask) > 0:  # Only try to get min/max if we have values
+            rospy.loginfo(f"Approach angle range of kept grasps: {np.min(approach_angles[combined_mask]):.1f}° to {np.max(approach_angles[combined_mask]):.1f}°")
+        
+        return filtered_gg, rs[combined_mask]
 
     def convert_grasps_to_poses(self, gg, eelink_rs):
         """Convert GraspGroup to a list of grasp poses (position + quaternion)"""
@@ -324,17 +253,148 @@ class Graspnet:
             geometry.paint_uniform_color(color)
 
         return geometries
+
+    def reorient_grasp_poses_vertical(self, grasp_poses, scores, geometries, num_best=10):
+        """
+        Reorient the best N grasp poses so that the approach direction is aligned 
+        with the downward Z-axis and perpendicular to X and Y axes.
+        
+        Args:
+            grasp_poses: List of grasp poses [x, y, z, qx, qy, qz, qw]
+            scores: List of corresponding scores
+            geometries: List of corresponding Open3D geometries
+            num_best: Number of best poses to reorient (default: 10)
+        
+        Returns:
+            reoriented_poses: List of reoriented grasp poses
+            reoriented_geometries: List of reoriented geometries
+            selected_scores: Scores of the selected poses
+        """
+        if len(grasp_poses) == 0:
+            return [], [], []
+        
+        # Sort by scores (highest first) and select the best N
+        sorted_indices = np.argsort(scores)[::-1]
+        num_to_select = min(num_best, len(grasp_poses))
+        best_indices = sorted_indices[:num_to_select]
+        
+        rospy.loginfo(f"Reorienting {num_to_select} best grasp poses for vertical approach")
+        
+        reoriented_poses = []
+        reoriented_geometries = []
+        selected_scores = []
+        
+        for idx in best_indices:
+            original_pose = grasp_poses[idx]
+            original_geometry = geometries[idx] if geometries else None
+            score = scores[idx]
+            
+            # Extract position and original orientation
+            position = original_pose[:3]
+            original_quat = original_pose[3:]
+            
+            # Create new rotation matrix with downward Z approach
+            # Approach direction: negative Z-axis (0, 0, 1)
+            approach_dir = np.array([0, 0, 1])
+            
+            # For the gripper coordinate system, we need to define:
+            # X-axis: approach direction (downward)
+            # Y-axis: perpendicular to approach (we can choose based on original orientation)
+            # Z-axis: perpendicular to both X and Y (right-hand rule)
+            
+            # Get the original rotation matrix to preserve some directional preference
+            original_rotation = R.from_quat(original_quat).as_matrix()
+            
+            # Method 1: Keep the original Y direction projected onto the horizontal plane
+            original_y = original_rotation[:, 1]  # Original Y-axis
+            # Project original Y onto horizontal plane (remove Z component)
+            horizontal_y = np.array([original_y[0], original_y[1], 0])
+            
+            # If the projection is too small, use a default direction
+            if np.linalg.norm(horizontal_y) < 0.1:
+                horizontal_y = np.array([1, 0, 0])  # Default to X direction
+            
+            # Normalize the horizontal Y direction
+            y_axis = horizontal_y / np.linalg.norm(horizontal_y)
+            
+            # Calculate Z-axis using cross product (right-hand rule)
+            # For downward approach: Z = X × Y
+            x_axis = approach_dir  # (0, 0, 1)
+            z_axis = np.cross(x_axis, y_axis)
+            z_axis = z_axis / np.linalg.norm(z_axis)
+            
+            # Recalculate Y to ensure orthogonality: Y = Z × X
+            y_axis = np.cross(z_axis, x_axis)
+            y_axis = y_axis / np.linalg.norm(y_axis)
+
+            # Ensure orthogonality
+            assert np.isclose(np.linalg.norm(x_axis), 1), "X-axis is not normalized"
+            assert np.isclose(np.linalg.norm(y_axis), 1), "Y-axis is not normalized"
+            assert np.isclose(np.linalg.norm(z_axis), 1), "Z-axis is not normalized"
+
+            assert np.isclose(np.dot(x_axis, y_axis), 0), "X and Y are not orthogonal"
+            assert np.isclose(np.dot(y_axis, z_axis), 0), "Y and Z are not orthogonal"
+            assert np.isclose(np.dot(z_axis, x_axis), 0), "Z and X are not orthogonal"
+            
+            # Create the new rotation matrix
+            new_rotation_matrix = np.column_stack([x_axis, y_axis, z_axis])
+            
+            # Ensure it's a proper rotation matrix (determinant = 1)
+            if np.linalg.det(new_rotation_matrix) < 0:
+                # Flip one axis to ensure right-handed coordinate system
+                new_rotation_matrix[:, 1] = -new_rotation_matrix[:, 1]
+            
+            # Convert to quaternion
+            new_rotation = R.from_matrix(new_rotation_matrix)
+            new_quat = new_rotation.as_quat()
+            
+            # Create the reoriented pose
+            reoriented_pose = np.concatenate([position, new_quat])
+            reoriented_poses.append(reoriented_pose)
+            selected_scores.append(score)
+            
+            # Transform the geometry if provided
+            if original_geometry is not None:
+                reoriented_geometry = copy.deepcopy(original_geometry)
+                
+                # Create transformation matrix for the geometry
+                # First, inverse transform to origin using original orientation
+                original_transform = np.eye(4)
+                original_transform[:3, :3] = original_rotation
+                original_transform[:3, 3] = position
+                
+                # New transform with reoriented rotation
+                new_transform = np.eye(4)
+                new_transform[:3, :3] = new_rotation_matrix
+                new_transform[:3, 3] = position
+                
+                # Apply the transformation: T_new * T_original^(-1)
+                combined_transform = new_transform @ np.linalg.inv(original_transform)
+                reoriented_geometry.transform(combined_transform)
+                
+                reoriented_geometries.append(reoriented_geometry)
+        
+        rospy.loginfo(f"Successfully reoriented {len(reoriented_poses)} grasp poses with vertical approach")
+        
+        return reoriented_poses, reoriented_geometries, selected_scores
     
-    def grasp_detection_real_world(self, fused_pcd_world, fused_pcd_canonical, world_to_canonical_transform, get_visual, min_score=0.15, top_down_only=True):
+    def grasp_detection_real_world(self, fused_pcd_world, fused_pcd_canonical, world_to_canonical_transform, get_visual, min_score=0.25, top_down_only=True, num_best=10, simple_orientation=True):
         """
         Generate grasping poses for a real-world setting without known object poses.
         
         Args:
-            full_pcd: Open3D point cloud of the scene
-            min_score: Minimum score threshold for grasp filtering
-            
+            fused_pcd_world: Point cloud in world coordinates
+            fused_pcd_canonical: Point cloud in canonical coordinates  
+            world_to_canonical_transform: Transformation matrix
+            get_visual: Whether to show visualizations
+            min_score: Minimum score threshold
+            num_best: Number of best grasps to reorient
+            simple_orientation: Use simple standard orientation vs. adaptive orientation
+        
         Returns:
-            list, list: List of grasp poses (position + quaternion), and visualization geometries
+            reoriented_poses: List of vertically oriented grasp poses
+            reoriented_geometries: Corresponding visualization geometries
+            scores: Grasp scores
         """
         try:
             # Check if the point cloud is valid
@@ -397,20 +457,30 @@ class Graspnet:
                 grasp_poses_world.append(grasp_pose_world)
                 geometries_world.append(geometry_world)
                 scores_world.append(score_canonical)
+
+            if len(grasp_poses_canonical) == 0:
+                rospy.logwarn("No grasp poses found for reorientation")
+                return [], [], []
+
+            # Reorient the best poses vertically
+            grasp_pose_reoriented, geometries_reoriented, scores_reoriented = self.reorient_grasp_poses_vertical(
+                grasp_poses_canonical, scores_canonical, geometries_canonical, num_best
+            )
             
             # Optional visualization
             if get_visual:  # Set to True for debugging
                 # Color the grasp poses by score
                 geometries_canonical = self.color_grasp_poses_by_score(geometries_canonical, scores_canonical)
-                geometries_world = self.color_grasp_poses_by_score(geometries_world, scores_world)
+                geometries_reoriented = self.color_grasp_poses_by_score(geometries_reoriented, scores_reoriented)
                 # Visualize the canonical based grasp poses
                 frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
                 o3d.visualization.draw_geometries([frame, fused_pcd_canonical] + geometries_canonical, f'Canonical Grasp Poses')
                 # Visualize the world based grasp poses
                 frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
-                o3d.visualization.draw_geometries([frame, fused_pcd_world] + geometries_world, f'World Grasp Poses')
+                o3d.visualization.draw_geometries([frame, fused_pcd_canonical] + geometries_reoriented, f'Reoriented Grasp Poses')
                 
-            return grasp_poses_world, geometries_world, scores_world
+            # return grasp_poses_world, geometries_world, scores_world
+            return grasp_pose_reoriented, geometries_reoriented, scores_reoriented
             
         except Exception as e:
             rospy.logerr(f"Error in grasp detection: {e}")
