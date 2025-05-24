@@ -377,6 +377,64 @@ class Graspnet:
         rospy.loginfo(f"Successfully reoriented {len(reoriented_poses)} grasp poses with vertical approach")
         
         return reoriented_poses, reoriented_geometries, selected_scores
+
+    def calculate_grasp_pose_center(self, grasp_pose):
+        """Extract the grasp pose center from the grasp pose (position part)"""
+        return grasp_pose[:3]  # [x, y, z]
+
+    def calculate_surface_normal_and_points(self, object_pcd, grasp_pose_center, radius=0.05):
+        """
+        Calculate the surface normal and points of the object around the grasp pose center.
+        
+        Args:
+            object_pcd: Open3D point cloud object
+            grasp_pose_center: Grasp pose center (position)
+            radius: Distance to search for surface points around the grasp pose center
+            
+        Returns:
+            surface_normal: Normal vector of the surface
+            surface_points: List of surface points within the radius
+        """
+        # Convert point cloud to numpy array
+        points = np.asarray(object_pcd.points)
+        
+        # Filter the points to get surface points around the grasp pose center
+        distances = np.linalg.norm(points - grasp_pose_center, axis=1)
+        surface_points = points[distances < radius]
+        
+        # Calculate surface normal using PCA (principal component analysis)
+        points_centered = surface_points - np.mean(surface_points, axis=0)
+        cov_matrix = np.cov(points_centered.T)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+        
+        # The eigenvector corresponding to the smallest eigenvalue is the surface normal
+        surface_normal = eigenvectors[:, 0]  # This is the normal vector of the object surface
+        
+        return surface_normal, surface_points
+
+    def project_point_to_surface(self, grasp_pose_center, surface_point, surface_normal):
+        """
+        Project the grasp pose center onto the surface using the surface normal.
+        
+        Args:
+            grasp_pose_center: The position of the grasp pose [x, y, z].
+            surface_point: A point on the surface [x, y, z].
+            surface_normal: The normal vector of the surface [nx, ny, nz].
+            
+        Returns:
+            projected_point: The projected point on the surface.
+            distance: The distance from the grasp pose center to the surface.
+        """
+        # Compute the vector from the surface point to the grasp pose center
+        vector_to_surface = np.array(grasp_pose_center) - np.array(surface_point)
+        
+        # Project the vector onto the surface normal
+        projection_distance = np.dot(vector_to_surface, surface_normal)  # Signed distance
+        
+        # Project the grasp pose center onto the surface by moving along the normal
+        projected_point = np.array(grasp_pose_center) - projection_distance * surface_normal
+        
+        return projected_point, abs(projection_distance)  # Use absolute distance
     
     def grasp_detection_real_world(self, fused_pcd_world, fused_pcd_canonical, world_to_canonical_transform, get_visual, min_score=0.25, top_down_only=True, num_best=10, simple_orientation=True):
         """
@@ -466,6 +524,14 @@ class Graspnet:
             grasp_pose_reoriented, geometries_reoriented, scores_reoriented = self.reorient_grasp_poses_vertical(
                 grasp_poses_canonical, scores_canonical, geometries_canonical, num_best
             )
+
+            best_grasp_pose_center = self.calculate_grasp_pose_center(grasp_pose_reoriented[0])
+            object_surface_normal, object_surface_points = self.calculate_surface_normal_and_points(fused_pcd_canonical, best_grasp_pose_center, radius=0.05)
+            rospy.loginfo(f'Best grasp pose center: {best_grasp_pose_center}')
+            rospy.loginfo(f"Surface points around best grasp pose center: {len(object_surface_points)} points found")
+            rospy.loginfo(f"Surface normal at best grasp pose center: {object_surface_normal}")
+            projected_point, distance = self.project_point_to_surface(best_grasp_pose_center, object_surface_points[0], object_surface_normal)
+            rospy.loginfo(f"Projected point on surface: {projected_point}, Distance: {distance:.4f} m")
             
             # Optional visualization
             if get_visual:  # Set to True for debugging
