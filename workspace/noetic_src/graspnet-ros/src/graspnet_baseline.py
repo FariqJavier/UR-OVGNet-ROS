@@ -20,7 +20,7 @@ from utils.collision_detector import ModelFreeCollisionDetector
 from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image
 
 class GraspNetBaseLine():
-    def __init__(self, checkpoint_path, num_point = 20000, num_view = 300, collision_thresh = 0.0005, empty_thresh = 0.30, voxel_size = 0.005):
+    def __init__(self, checkpoint_path, num_point = 20000, num_view = 300, collision_thresh = 0.001, empty_thresh = 0.30, voxel_size = 0.01):
         self.checkpoint_path = checkpoint_path
         self.num_point = num_point
         self.num_view = num_view
