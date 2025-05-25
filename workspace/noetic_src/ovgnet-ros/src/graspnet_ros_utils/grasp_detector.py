@@ -378,11 +378,11 @@ class Graspnet:
         
         return reoriented_poses, reoriented_geometries, selected_scores
 
-    def calculate_grasp_pose_center(self, grasp_pose):
+    def get_grasp_pose_center(self, grasp_pose):
         """Extract the grasp pose center from the grasp pose (position part)"""
         return grasp_pose[:3]  # [x, y, z]
 
-    def calculate_surface_normal_and_points(self, object_pcd, grasp_pose_center, radius=0.05):
+    def get_surface_normal_and_points(self, object_pcd, grasp_pose_center, radius=0.05):
         """
         Calculate the surface normal and points of the object around the grasp pose center.
         
@@ -412,29 +412,51 @@ class Graspnet:
         
         return surface_normal, surface_points
 
-    def project_point_to_surface(self, grasp_pose_center, surface_point, surface_normal):
+    def adjust_grasp_pose_distance_to_surface(self, grasp_pose_center, surface_points, surface_normal, target_distance=0.02):
         """
-        Project the grasp pose center onto the surface using the surface normal.
-        
+        Adjust the grasp pose center so that it is exactly at a specified distance from the surface.
+
         Args:
-            grasp_pose_center: The position of the grasp pose [x, y, z].
-            surface_point: A point on the surface [x, y, z].
+            grasp_pose_center: The center of the grasp pose [x, y, z].
+            surface_points: The points on the surface [Nx3 array of points].
             surface_normal: The normal vector of the surface [nx, ny, nz].
-            
+            target_distance: The target distance (default: 2 cm or 0.02 meters).
+
         Returns:
-            projected_point: The projected point on the surface.
-            distance: The distance from the grasp pose center to the surface.
+            adjusted_grasp_pose: The adjusted grasp pose with position and quaternion [x, y, z, qx, qy, qz, qw].
         """
-        # Compute the vector from the surface point to the grasp pose center
-        vector_to_surface = np.array(grasp_pose_center) - np.array(surface_point)
+        # Convert the surface points and surface normal to numpy arrays
+        grasp_pose_center = np.array(grasp_pose_center)
+        surface_points = np.array(surface_points)
+        surface_normal = np.array(surface_normal)
         
-        # Project the vector onto the surface normal
-        projection_distance = np.dot(vector_to_surface, surface_normal)  # Signed distance
+        # Calculate distances from the grasp pose center to each surface point
+        distances = np.linalg.norm(surface_points - grasp_pose_center, axis=1)
         
-        # Project the grasp pose center onto the surface by moving along the normal
-        projected_point = np.array(grasp_pose_center) - projection_distance * surface_normal
+        # Find the closest surface point to the grasp pose center
+        nearest_surface_point = surface_points[np.argmin(distances)]
         
-        return projected_point, abs(projection_distance)  # Use absolute distance
+        # Calculate the distance from the grasp pose center to the surface
+        current_distance = np.min(distances)
+        
+        # Calculate the difference between the current distance and the target distance
+        adjustment_distance = target_distance - current_distance
+        
+        # Adjust the grasp pose center by moving it along the surface normal
+        adjusted_grasp_pose_center = grasp_pose_center + adjustment_distance * surface_normal
+        
+        # Create the reoriented grasp pose (assuming the orientation is unchanged)
+        # Convert to quaternion (keeping the original orientation)
+        # For simplicity, we assume that the original grasp pose orientation remains valid
+        # You can adjust this if you want to change the orientation as well
+        grasp_pose_quat = [0, 0, 0, 1]  # Placeholder quaternion (no rotation)
+        
+        # Combine position and quaternion
+        adjusted_grasp_pose = np.concatenate([adjusted_grasp_pose_center, grasp_pose_quat])
+        
+        # rospy.loginfo(f"Adjusted grasp pose center to {adjusted_grasp_pose_center}, target distance: {target_distance} m")
+
+        return adjusted_grasp_pose
     
     def grasp_detection_real_world(self, fused_pcd_world, fused_pcd_canonical, world_to_canonical_transform, get_visual, min_score=0.25, top_down_only=True, num_best=10, simple_orientation=True):
         """
@@ -525,14 +547,25 @@ class Graspnet:
                 grasp_poses_canonical, scores_canonical, geometries_canonical, num_best
             )
 
-            best_grasp_pose_center = self.calculate_grasp_pose_center(grasp_pose_reoriented[0])
-            object_surface_normal, object_surface_points = self.calculate_surface_normal_and_points(fused_pcd_canonical, best_grasp_pose_center, radius=0.05)
-            rospy.loginfo(f'Best grasp pose center: {best_grasp_pose_center}')
-            rospy.loginfo(f"Surface points around best grasp pose center: {len(object_surface_points)} points found")
-            rospy.loginfo(f"Surface normal at best grasp pose center: {object_surface_normal}")
-            projected_point, distance = self.project_point_to_surface(best_grasp_pose_center, object_surface_points[0], object_surface_normal)
-            rospy.loginfo(f"Projected point on surface: {projected_point}, Distance: {distance:.4f} m")
-            
+            if len(grasp_pose_reoriented) == 0:
+                rospy.logwarn("No grasp poses found for reorientation")
+                return [], [], []
+
+            for i in range(len(grasp_pose_reoriented)):
+                # Get the center of the grasp pose
+                grasp_pose_center = self.get_grasp_pose_center(grasp_pose_reoriented[i])
+                # Get the surface normal and points around the grasp pose center
+                object_surface_normal, object_surface_points = self.get_surface_normal_and_points(fused_pcd_canonical, grasp_pose_center, radius=0.05)
+                # Reorient the grasp pose to be at a distance of 2 cm from the surface
+                adjusted_grasp_pose = self.adjust_grasp_pose_distance_to_surface(
+                    grasp_pose_center, object_surface_points, object_surface_normal, target_distance=0.02
+                )
+                # Calculate distances from the grasp pose center to each surface point
+                distances = np.linalg.norm(object_surface_points - adjusted_grasp_pose[:3], axis=1)
+                rospy.loginfo(f"Adjusted grasp pose {i} center to object surface, distances to surface points: {distances}")
+                # Update the reoriented grasp pose with the adjusted position
+                grasp_pose_reoriented[i][:3] = adjusted_grasp_pose[:3]
+
             # Optional visualization
             if get_visual:  # Set to True for debugging
                 # Color the grasp poses by score
