@@ -902,9 +902,30 @@ def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_i
             except Exception as e:
                 rospy.logwarn(f"Camera {camera_id} - Plane detection failed: {e}")
 
-            # visualization
-            frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
-            o3d.visualization.draw_geometries([pcd, frame], f"Camera {camera_id} - Point Cloud")
+            # # visualization
+            # frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
+            # o3d.visualization.draw_geometries([pcd, frame], f"Camera {camera_id} - Point Cloud")
+
+            # Log statistics
+            # Get the axis-aligned bounding box (AABB) of the point cloud
+            min_bound = pcd.get_min_bound()
+            max_bound = pcd.get_max_bound()
+            min_x, min_y, min_z = min_bound
+            max_x, max_y, max_z = max_bound
+
+            # Extract point cloud data
+            points = np.asarray(pcd.points)
+                
+            # Compute the mean for x, y, z coordinates
+            mean_x = np.mean(points[:, 0])
+            mean_y = np.mean(points[:, 1])
+            mean_z = np.mean(points[:, 2])
+
+            # Print the min, max, and mean values for X, Y, Z
+            rospy.loginfo(f"Bounding Box:")
+            rospy.loginfo(f"Min Bound: X={min_bound[0]}, Y={min_bound[1]}, Z={min_bound[2]}")
+            rospy.loginfo(f"Max Bound: X={max_bound[0]}, Y={max_bound[1]}, Z={max_bound[2]}")
+            rospy.loginfo(f"Mean: X={mean_x:.3f}, Y={mean_y:.3f}, Z={mean_z:.3f}")
             
             pcds.append(pcd)
             rospy.loginfo(f"Camera {camera_id} - Added point cloud with {len(pcd.points)} points")
