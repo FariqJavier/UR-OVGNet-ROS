@@ -794,6 +794,13 @@ def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_i
                 rospy.loginfo(f"Camera {camera_id} - Saved debug depth image to /tmp/debug_depth_cam_{camera_id}.png")
                 
                 continue  # Skip this camera
+
+            import cv2
+            debug_depth = (depth_image_np / np.max(depth_image_np) * 255).astype(np.uint8)
+            debug_depth_colored = cv2.applyColorMap(debug_depth, cv2.COLORMAP_JET)
+            cv2.rectangle(debug_depth_colored, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+            cv2.imwrite(f'/home/ros/catkin_ws/src/ovgnet-ros/data/{camera_id}/debug_depth_cam_{camera_id}.png', debug_depth_colored)
+            rospy.loginfo(f"Camera {camera_id} - Saved debug depth image to /home/ros/src/ovgnet-ros/data/{camera_id}/debug_depth_cam_{camera_id}.png")
             
             rospy.loginfo(f"Camera {camera_id} - Masked depth range: {np.min(masked_valid):.3f} to {np.max(masked_valid):.3f}m, mean: {np.mean(masked_valid):.3f}m")
             rospy.loginfo(f"Camera {camera_id} - Valid masked pixels: {len(masked_valid)}")
@@ -806,12 +813,6 @@ def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_i
             if np.sum(valid_camera_mask) == 0:
                 rospy.logerr(f"Camera {camera_id} - No valid 3D points generated from depth")
                 return None
-                
-            valid_camera_points = xyz[valid_camera_mask]
-            rospy.loginfo(f"Camera {camera_id} - Camera frame points: {len(valid_camera_points)}")
-            rospy.loginfo(f"Camera {camera_id} - Camera frame X: [{np.min(valid_camera_points[:,0]):.3f}, {np.max(valid_camera_points[:,0]):.3f}]")
-            rospy.loginfo(f"Camera {camera_id} - Camera frame Y: [{np.min(valid_camera_points[:,1]):.3f}, {np.max(valid_camera_points[:,1]):.3f}]")
-            rospy.loginfo(f"Camera {camera_id} - Camera frame Z: [{np.min(valid_camera_points[:,2]):.3f}, {np.max(valid_camera_points[:,2]):.3f}]")
             
             # Apply transform to world coordinates
             position = np.array(camera_info["position"]).reshape(3, 1)
@@ -860,11 +861,11 @@ def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_i
             y_values = filtered_points[:, 1]
             z_values = filtered_points[:, 2]
             
-            rospy.loginfo(f"Camera {camera_id} - Filtered points stats:")
-            rospy.loginfo(f"Camera {camera_id} - X: max={np.max(x_values):.3f}, min={np.min(x_values):.3f}, mean={np.mean(x_values):.3f}")
-            rospy.loginfo(f"Camera {camera_id} - Y: max={np.max(y_values):.3f}, min={np.min(y_values):.3f}, mean={np.mean(y_values):.3f}")
-            rospy.loginfo(f"Camera {camera_id} - Z: max={np.max(z_values):.3f}, min={np.min(z_values):.3f}, mean={np.mean(z_values):.3f}")
-            rospy.loginfo(f"TCamera {camera_id} - otal valid points: {len(filtered_points)}")
+            rospy.loginfo(f"Camera {camera_id} - After Filtering Stats:")
+            rospy.loginfo(f"Camera {camera_id} - Min Bound: X={np.min(x_values):.3f}, Y={np.min(y_values):.3f}, Z={np.min(z_values):.3f}")
+            rospy.loginfo(f"Camera {camera_id} - Max Bound: X={np.max(x_values):.3f}, Y={np.max(y_values):.3f}, Z={np.max(z_values):.3f}")
+            rospy.loginfo(f"Camera {camera_id} - Mean: X={np.mean(x_values):.3f}, Y={np.mean(y_values):.3f}, Z={np.mean(z_values):.3f}")
+            rospy.loginfo(f"Camera {camera_id} - Total valid points: {len(filtered_points)}")
             
             # Create point cloud
             pcd = o3d.geometry.PointCloud()
@@ -902,9 +903,9 @@ def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_i
             except Exception as e:
                 rospy.logwarn(f"Camera {camera_id} - Plane detection failed: {e}")
 
-            # # visualization
-            # frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
-            # o3d.visualization.draw_geometries([pcd, frame], f"Camera {camera_id} - Point Cloud")
+            # visualization
+            frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
+            o3d.visualization.draw_geometries([pcd, frame], f"Camera {camera_id} - Point Cloud")
 
             # Log statistics
             # Get the axis-aligned bounding box (AABB) of the point cloud
@@ -922,10 +923,10 @@ def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_i
             mean_z = np.mean(points[:, 2])
 
             # Print the min, max, and mean values for X, Y, Z
-            rospy.loginfo(f"Bounding Box:")
-            rospy.loginfo(f"Min Bound: X={min_bound[0]}, Y={min_bound[1]}, Z={min_bound[2]}")
-            rospy.loginfo(f"Max Bound: X={max_bound[0]}, Y={max_bound[1]}, Z={max_bound[2]}")
-            rospy.loginfo(f"Mean: X={mean_x:.3f}, Y={mean_y:.3f}, Z={mean_z:.3f}")
+            rospy.loginfo(f"Camera {camera_id} - Point Cloud Stats:")
+            rospy.loginfo(f"Camera {camera_id} - Min Bound: X={min_bound[0]}, Y={min_bound[1]}, Z={min_bound[2]}")
+            rospy.loginfo(f"Camera {camera_id} - Max Bound: X={max_bound[0]}, Y={max_bound[1]}, Z={max_bound[2]}")
+            rospy.loginfo(f"Camera {camera_id} - Mean: X={mean_x:.3f}, Y={mean_y:.3f}, Z={mean_z:.3f}")
             
             pcds.append(pcd)
             rospy.loginfo(f"Camera {camera_id} - Added point cloud with {len(pcd.points)} points")

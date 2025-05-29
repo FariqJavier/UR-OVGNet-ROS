@@ -562,7 +562,7 @@ class Graspnet:
                 )
                 # Calculate distances from the grasp pose center to each surface point
                 distances = np.linalg.norm(object_surface_points - adjusted_grasp_pose[:3], axis=1)
-                rospy.loginfo(f"Adjusted grasp pose {i} center to object surface, distances to surface points: {distances}")
+                rospy.loginfo(f"Adjusted grasp pose {i} center to object surface, distances to surface points:")
                 # Update the reoriented grasp pose with the adjusted position
                 grasp_pose_reoriented[i][:3] = adjusted_grasp_pose[:3]
 
