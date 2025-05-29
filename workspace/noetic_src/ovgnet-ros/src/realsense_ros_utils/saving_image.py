@@ -7,7 +7,8 @@ import os
 import numpy as np
 from typing import Union
 import tf2_ros
-from tf.transformations import quaternion_multiply, quaternion_from_euler
+from tf.transformations import quaternion_multiply, quaternion_from_euler, euler_from_quaternion
+import math
 from scipy.spatial.transform import Rotation as R
 
 def create_and_publish_mask(
@@ -296,7 +297,7 @@ def get_color_and_depth_image(
         try:
             # Wait for transform to be available
             rospy.loginfo("Waiting for camera transform...")
-            transform = tfBuffer.lookup_transform('base_link', 'camera_color_optical_frame', rospy.Time(0), rospy.Duration(5.0))
+            transform = tfBuffer.lookup_transform('world', 'camera_depth_optical_frame', rospy.Time(0), rospy.Duration(1.0))
             
             # Debug the transform
             rospy.loginfo(f"Camera frame: {transform.child_frame_id}")
@@ -304,9 +305,9 @@ def get_color_and_depth_image(
             
             # Extract position and orientation
             position_camera = np.array([
-                transform.transform.translation.x,
-                transform.transform.translation.y,
-                transform.transform.translation.z
+                transform.transform.translation.x - 0.05,  # Add offset for eye-in-hand
+                transform.transform.translation.y + 0.04,
+                transform.transform.translation.z + 0.175
             ])
             
             # FIX 2: Store quaternion in consistent format [x, y, z, w]

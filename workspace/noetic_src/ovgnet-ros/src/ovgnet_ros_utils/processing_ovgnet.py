@@ -596,7 +596,7 @@ def create_pose_msg(
         
         pose_stamped.pose.position.x = position[0]
         pose_stamped.pose.position.y = position[1]
-        pose_stamped.pose.position.z = position[2] + 0.18
+        pose_stamped.pose.position.z = position[2]
         
         pose_stamped.pose.orientation.x = quat[0]
         pose_stamped.pose.orientation.y = quat[1]
@@ -607,7 +607,7 @@ def create_pose_msg(
         # Input is [x, y, z, qx, qy, qz, qw]
         pose_stamped.pose.position.x = float(grasp_pose[0])
         pose_stamped.pose.position.y = float(grasp_pose[1])
-        pose_stamped.pose.position.z = float(grasp_pose[2]) + 0.18
+        pose_stamped.pose.position.z = float(grasp_pose[2])
         
         pose_stamped.pose.orientation.x = float(grasp_pose[3])
         pose_stamped.pose.orientation.y = float(grasp_pose[4])
