@@ -19,6 +19,7 @@ import tf2_ros
 reconstruction_config = {
     'nb_neighbors': 20,        # Increased from 50
     'std_ratio': 2.0,          # Decreased from 2.0
+    'max_consensus_distance': 0.01, # 0.01
     'voxel_size': 0.01,       # Keep as is
     'icp_max_try': 5,          # Keep as is
     'icp_max_iter': 2000,      # Keep as is
@@ -36,7 +37,7 @@ reconstruction_config = {
     'visualize_final': True,           # Set to True for debugging
     'min_object_height': 0.005,         # Min height above table
     'max_object_height': 0.5,           # Max height above table
-    'fuse_nb_neighbors': 60,        # Increased from 50
+    'fuse_nb_neighbors': 40,        # Increased from 50
     'fuse_std_ratio': 2.0,          # Decreased from 2.0
     'fuse_voxel_size': 0.005           # Final voxel size for downsampling
 }
@@ -47,6 +48,14 @@ graspnet_config = {
     'dist_thresh': 0.05,
     'angle_thresh': 15,
     'mask_thresh': 0.5
+}
+
+fusion_pose_config = {
+    'delta_x': 0.0,  
+    'delta_y': 0.0,  
+    'delta_z': 0.0,  
+    'delta_yaw': np.pi,  
+    'desired_z': 0.02,
 }
 
 def get_pointcloud(depth, intrinsics):
@@ -690,6 +699,7 @@ def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_i
     """
     try:
         pcds = []
+        means = []
         transformations = {}
         camera_info_dict = {}
 
@@ -928,6 +938,7 @@ def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_i
             rospy.loginfo(f"Camera {camera_id} - Max Bound: X={max_bound[0]}, Y={max_bound[1]}, Z={max_bound[2]}")
             rospy.loginfo(f"Camera {camera_id} - Mean: X={mean_x:.3f}, Y={mean_y:.3f}, Z={mean_z:.3f}")
             
+            means.append(pcd.get_center())
             pcds.append(pcd)
             rospy.loginfo(f"Camera {camera_id} - Added point cloud with {len(pcd.points)} points")
         
@@ -939,6 +950,40 @@ def get_fuse_pointcloud(realsense_input_dict, groundingdino_output_dict, frame_i
             rospy.loginfo("Only one valid point cloud, no fusion needed")
             return pcds[0]
         else:
+            consensus_mean = np.mean(means, axis=0)
+            rospy.loginfo(f"Consensus mean (median of means): {consensus_mean}")
+
+            pcds_for_fusion = []
+            max_dist = reconstruction_config.get('max_consensus_distance', 0.01)  # Default to 5cm
+            for pcd in pcds:
+                dist_to_consensus = np.linalg.norm(pcd.get_center() - consensus_mean)
+                if dist_to_consensus <= max_dist:
+                    pcds_for_fusion.append(pcd)
+                else:
+                    continue
+
+            # # Use process_pcds function to align and merge the point clouds
+            # fused_trans_world, fused_pcd_world = process_pcds(pcds_for_fusion, reconstruction_config)
+            
+            # if fused_pcd_world is not None and len(fused_pcd_world.points) > 0:
+            #     rospy.loginfo(f"Successfully fused {len(pcds)} point clouds, resulting in {len(fused_pcd_world.points)} points")
+
+            #     # After fusion is complete, add orientation correction
+            #     if reconstruction_config.get('orient_for_grasping', False):
+            #         print("Orienting point cloud for top-down grasping...")
+            #         fused_pcd_canonical, fused_trans_canonical = orient_for_top_grasping(
+            #             fused_pcd_world, 
+            #             debug=reconstruction_config.get('debug_orientation', False)
+            #         )
+            #         # Optional visualization of final result
+            #         if reconstruction_config.get('visualize_final', False):
+            #             frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
+            #             o3d.visualization.draw_geometries([fused_pcd_canonical, frame], "Final Aligned Point Cloud")
+            #     return fused_pcd_world, fused_pcd_canonical, fused_trans_world, fused_trans_canonical
+            # else:
+            #     rospy.logwarn("Fusion resulted in empty point cloud")
+            #     return [], [], [], []
+
             # Use process_pcds function to align and merge the point clouds
             fused_trans_world, fused_pcd_world = process_pcds(pcds, reconstruction_config)
             
@@ -1396,6 +1441,61 @@ def orient_for_top_grasping(pcd, debug=False):
     else:
         # No rotation needed if angle is small (within 10 degrees)
         transform = transform1
+
+    # Step 3.5: Apply 180-degree yaw around the object's centroid
+    yaw_angle = fusion_pose_config.get('delta_yaw', np.pi)  # 180 degrees in radians
+
+    # Get the object's centroid
+    centroid = np.mean(np.asarray(oriented_pcd.points), axis=0)
+
+    # Translate to origin (centroid -> origin)
+    translate_to_origin = np.eye(4)
+    translate_to_origin[:3, 3] = -centroid
+
+    # Yaw rotation matrix (around Z-axis)
+    yaw_rotation = np.array([
+        [np.cos(yaw_angle), -np.sin(yaw_angle), 0],
+        [np.sin(yaw_angle),  np.cos(yaw_angle), 0],
+        [0,                 0,                 1]
+    ])
+    yaw_transform = np.eye(4)
+    yaw_transform[:3, :3] = yaw_rotation
+
+    # Translate back to original position
+    translate_back = np.eye(4)
+    translate_back[:3, 3] = centroid
+
+    # Final transformation: T_back * R_yaw * T_origin
+    total_yaw_transform = translate_back @ yaw_transform @ translate_to_origin
+
+    # Apply to the point cloud
+    oriented_pcd.transform(total_yaw_transform)
+    transform = total_yaw_transform @ transform  # Combine with previous
+
+    # Step 4: Apply custom translation in X, Y, Z
+    delta_x = fusion_pose_config.get('delta_x', 0.0)
+    delta_y = fusion_pose_config.get('delta_y', 0.0)
+    delta_z = fusion_pose_config.get('delta_z', 0.0)
+    # Create translation vector
+    translation_vector = np.array([delta_x, delta_y, delta_z])
+
+    translation_transform = np.eye(4)
+    translation_transform[:3, 3] = translation_vector
+
+    # Apply the translation
+    oriented_pcd.transform(translation_transform)
+    transform = translation_transform @ transform  # Combine with previous
+
+    # Step 5: Move the object so its centroid.z is at 0.02
+    desired_z = fusion_pose_config.get('desired_z', 0.02)
+    current_centroid = np.mean(np.asarray(oriented_pcd.points), axis=0)
+    delta_z_to_align = desired_z - current_centroid[2]  # current Z to target Z
+
+    align_transform = np.eye(4)
+    align_transform[2, 3] = delta_z_to_align  # Only move along Z
+
+    oriented_pcd.transform(align_transform)
+    transform = align_transform @ transform  # Combine with previous
     
     # Step 4: Visualize (optional)
     if debug:
