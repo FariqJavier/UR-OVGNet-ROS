@@ -297,7 +297,7 @@ def get_color_and_depth_image(
         try:
             # Wait for transform to be available
             rospy.loginfo("Waiting for camera transform...")
-            transform = tfBuffer.lookup_transform('world', 'camera_depth_optical_frame', rospy.Time(0), rospy.Duration(1.0))
+            transform = tfBuffer.lookup_transform('world', 'camera_color_optical_frame', rospy.Time(0), rospy.Duration(1.0))
             
             # Debug the transform
             rospy.loginfo(f"Camera frame: {transform.child_frame_id}")
@@ -305,11 +305,28 @@ def get_color_and_depth_image(
             
             # Extract position and orientation
             position_camera = np.array([
-                transform.transform.translation.x - 0.05,  # Add offset for eye-in-hand
-                transform.transform.translation.y + 0.04,
-                transform.transform.translation.z + 0.175
+                transform.transform.translation.x,  # Add offset for eye-in-hand
+                transform.transform.translation.y,
+                transform.transform.translation.z
             ])
             
+            # current_roll, current_pitch, current_yaw = euler_from_quaternion([
+            #     transform.transform.rotation.x,
+            #     transform.transform.rotation.y,
+            #     transform.transform.rotation.z,
+            #     transform.transform.rotation.w
+            # ])
+            # # Adjust yaw for eye-in-hand setup
+            # adjusted_yaw = current_yaw + math.radians(180) # Rotate 180 degrees to align with hand
+            # adjusted_quat = quaternion_from_euler(current_roll, current_pitch, adjusted_yaw)
+
+            # orientation_camera = np.array([
+            #     adjusted_quat[0],
+            #     adjusted_quat[1],
+            #     adjusted_quat[2],
+            #     adjusted_quat[3]
+            # ])
+
             # FIX 2: Store quaternion in consistent format [x, y, z, w]
             orientation_camera = np.array([
                 transform.transform.rotation.x,
