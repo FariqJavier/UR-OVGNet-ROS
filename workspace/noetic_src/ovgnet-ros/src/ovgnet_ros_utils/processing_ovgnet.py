@@ -313,7 +313,7 @@ def get_graspnet_inference (
             # Create a screenshot of the scene with the best grasp
             vis = o3d.visualization.Visualizer()
             vis.create_window(visible=visualize)
-            vis.add_geometry(fused_pcd_world)
+            vis.add_geometry(fused_pcd_canonical)
             vis.add_geometry(coord_frame)
             
             # Add all grasps
@@ -322,8 +322,8 @@ def get_graspnet_inference (
                 
             # Set view
             view_control = vis.get_view_control()
-            view_control.set_front([0, 0, -1])  # View from front
-            view_control.set_up([0, -1, 0])     # Up direction
+            view_control.set_front([0, 0, 1])  # View from front
+            view_control.set_up([0, 1, 0])     # Up direction
             view_control.set_zoom(0.7)
             
             # Update visualization and capture the image
@@ -605,14 +605,16 @@ def create_pose_msg(
         
     elif isinstance(grasp_pose, (list, np.ndarray)) and len(grasp_pose) == 7:
         # Input is [x, y, z, qx, qy, qz, qw]
-        pose_stamped.pose.position.x = float(grasp_pose[0])
-        pose_stamped.pose.position.y = float(grasp_pose[1])
-        pose_stamped.pose.position.z = float(grasp_pose[2])
+        pose_stamped.pose.position.x = float(grasp_pose[0]) + 0.07
+        pose_stamped.pose.position.y = float(grasp_pose[1]) + 0.15
+        pose_stamped.pose.position.z = float(grasp_pose[2]) + 0.13
         
         pose_stamped.pose.orientation.x = float(grasp_pose[3])
         pose_stamped.pose.orientation.y = float(grasp_pose[4])
         pose_stamped.pose.orientation.z = float(grasp_pose[5])
         pose_stamped.pose.orientation.w = float(grasp_pose[6])
+
+        rospy.loginfo(f'Creating pose from 7D grasp pose: {pose_stamped}')
         
     else:
         rospy.logerr(f"Invalid grasp pose format: {type(grasp_pose)} with shape/length {getattr(grasp_pose, 'shape', len(grasp_pose) if hasattr(grasp_pose, '__len__') else 'N/A')}")
