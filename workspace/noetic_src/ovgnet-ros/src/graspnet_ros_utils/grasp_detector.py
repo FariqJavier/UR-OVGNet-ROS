@@ -412,7 +412,7 @@ class Graspnet:
         
         return surface_normal, surface_points
 
-    def adjust_grasp_pose_distance_to_surface(self, grasp_pose_center, surface_points, surface_normal, target_distance=0.02):
+    def adjust_grasp_pose_distance_to_surface(self, grasp_pose_center, surface_points, surface_normal, geometry, target_distance=0.02):
         """
         Adjust the grasp pose center so that it is exactly at a specified distance from the surface.
 
@@ -454,10 +454,124 @@ class Graspnet:
         # Combine position and quaternion
         adjusted_grasp_pose = np.concatenate([adjusted_grasp_pose_center, grasp_pose_quat])
         
-        # rospy.loginfo(f"Adjusted grasp pose center to {adjusted_grasp_pose_center}, target distance: {target_distance} m")
+        # Compute translation offset
+        offset = adjusted_grasp_pose[:3] - grasp_pose_center
 
-        return adjusted_grasp_pose
+        # Adjust geometry accordingly
+        geometry.translate(offset)
+
+        return adjusted_grasp_pose, geometry
     
+    def move_best_grasp_pose_to_object_midpoint(self, best_grasp_pose, object_pcd, best_grasp_geometry):
+        """
+        Move the best grasp pose to align its position with the object centroid.
+
+        Args:
+            best_grasp_pose: The best grasp pose [x, y, z, qx, qy, qz, qw]
+            object_pcd: Open3D point cloud of the object
+            best_grasp_geometry: The geometry of the best grasp pose
+        
+        Returns:
+            moved_grasp_pose: Updated grasp pose with position at object centroid
+        """
+        # Extract point cloud data
+        object_points = np.asarray(object_pcd.points)
+            
+        # Compute the mean for x, y coordinates
+        mean_x = np.mean(object_points[:, 0])
+        mean_y = np.mean(object_points[:, 1])
+        object_centroid = [mean_x, mean_y]
+
+        new_pose = np.array(best_grasp_pose)  # Copy
+        new_pose[:2] = object_centroid
+
+        offset = new_pose[:3] - best_grasp_pose[:3]
+
+        best_grasp_geometry.translate(offset)
+
+        return new_pose, best_grasp_geometry
+
+    def move_best_grasp_pose_to_centroid(self, best_grasp_pose, object_pcd, best_grasp_geometry):
+        """
+        Move the best grasp pose to align its position with the object centroid.
+
+        Args:
+            best_grasp_pose: The best grasp pose [x, y, z, qx, qy, qz, qw]
+            object_pcd: Open3D point cloud of the object
+            best_grasp_geometry: The geometry of the best grasp pose
+        
+        Returns:
+            moved_grasp_pose: Updated grasp pose with position at object centroid
+        """
+        # Extract point cloud data
+        object_points = np.asarray(object_pcd.points)
+        
+        # Compute the centroid of the object point cloud
+        object_centroid = np.mean(object_points, axis=0)
+
+        new_pose = np.array(best_grasp_pose)
+        new_pose[:3] = object_centroid  # Move the grasp pose to the centroid
+
+        offset = new_pose[:3] - best_grasp_pose[:3]
+        best_grasp_geometry.translate(offset)
+        # Return the updated grasp pose and geometry
+        return new_pose, best_grasp_geometry
+
+    def select_best_grasp_near_centroid(self, grasp_poses, grasp_geometries, grasp_scores, object_pcd):
+        """
+        Selects the best grasp by finding the one closest to the object's centroid.
+
+        This method combines two heuristics:
+        1. High grasp quality score (already filtered).
+        2. Stability (proximity to the center of mass).
+
+        Args:
+            grasp_poses: A list of candidate grasp poses [x, y, z, qx, qy, qz, qw].
+            grasp_geometries: A list of corresponding Open3D geometries.
+            grasp_scores: A list of corresponding scores.
+            object_pcd: The Open3D point cloud of the target object.
+
+        Returns:
+            best_pose: The selected single best grasp pose.
+            best_geometry: The corresponding geometry.
+            best_score: The corresponding score.
+        """
+        if not grasp_poses:
+            rospy.logwarn("No grasp poses provided to select from.")
+            return None, None, None
+
+        # 1. Calculate the object's 3D centroid
+        object_points = np.asarray(object_pcd.points)
+        if object_points.shape[0] == 0:
+            rospy.logwarn("Cannot compute centroid of an empty point cloud.")
+            # Fallback: return the highest-scoring grasp
+            best_idx = np.argmax(grasp_scores)
+            return grasp_poses[best_idx], grasp_geometries[best_idx], grasp_scores[best_idx]
+            
+        object_centroid = np.mean(object_points, axis=0)
+        rospy.loginfo(f"Object centroid calculated at: {object_centroid}")
+        
+        # Visualize centroid for debugging
+        centroid_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.01)
+        centroid_sphere.paint_uniform_color([1, 0, 0]) # Red
+        centroid_sphere.translate(object_centroid)
+        # o3d.visualization.draw_geometries([object_pcd, centroid_sphere] + grasp_geometries)
+
+
+        # 2. Find the grasp pose closest to the centroid
+        grasp_positions = np.array([pose[:3] for pose in grasp_poses])
+        distances_to_centroid = np.linalg.norm(grasp_positions - object_centroid, axis=1)
+        
+        # 3. Select the index of the closest grasp
+        closest_grasp_index = np.argmin(distances_to_centroid)
+        rospy.loginfo(f"Selected grasp #{closest_grasp_index} as it is closest to the centroid.")
+        
+        best_pose = grasp_poses[closest_grasp_index]
+        best_geometry = grasp_geometries[closest_grasp_index]
+        best_score = grasp_scores[closest_grasp_index]
+        
+        return best_pose, best_geometry, best_score
+        
     def grasp_detection_real_world(self, fused_pcd_world, fused_pcd_canonical, world_to_canonical_transform, get_visual, min_score=0.25, top_down_only=True, num_best=10, simple_orientation=True):
         """
         Generate grasping poses for a real-world setting without known object poses.
@@ -557,14 +671,34 @@ class Graspnet:
                 # Get the surface normal and points around the grasp pose center
                 object_surface_normal, object_surface_points = self.get_surface_normal_and_points(fused_pcd_canonical, grasp_pose_center, radius=0.05)
                 # Reorient the grasp pose to be at a distance of 2 cm from the surface
-                adjusted_grasp_pose = self.adjust_grasp_pose_distance_to_surface(
-                    grasp_pose_center, object_surface_points, object_surface_normal, target_distance=0.02
+                adjusted_grasp_pose, adjusted_geometry = self.adjust_grasp_pose_distance_to_surface(
+                    grasp_pose_center, object_surface_points, object_surface_normal, geometries_reoriented[i], target_distance=0.02
                 )
                 # Calculate distances from the grasp pose center to each surface point
                 distances = np.linalg.norm(object_surface_points - adjusted_grasp_pose[:3], axis=1)
                 rospy.loginfo(f"Adjusted grasp pose {i} center to object surface, distances to surface points:")
                 # Update the reoriented grasp pose with the adjusted position
                 grasp_pose_reoriented[i][:3] = adjusted_grasp_pose[:3]
+                # Update the geometry with the adjusted position
+                geometries_reoriented[i] = adjusted_geometry
+
+            # # Adjust the best grasp pose to the object midpoint
+            # grasp_pose_reoriented, geometries_reoriented = self.move_best_grasp_pose_to_object_midpoint(
+            #     grasp_pose_reoriented[0], fused_pcd_canonical, geometries_reoriented[0]
+            # )
+
+            # # Adjust the best grasp pose to the object centroid
+            # grasp_pose_reoriented[0], geometries_reoriented[0] = self.move_best_grasp_pose_to_centroid(
+            #     grasp_pose_reoriented[0], fused_pcd_canonical, geometries_reoriented[0]
+            # )
+
+            best_pose, best_geometry, best_score = self.select_best_grasp_near_centroid(
+                grasp_pose_reoriented, geometries_reoriented, scores_reoriented, fused_pcd_canonical
+            )
+
+            if best_pose is None:
+                rospy.logwarn("Could not select a best grasp pose.")
+                return [], [], []
 
             # Optional visualization
             if get_visual:  # Set to True for debugging
@@ -578,8 +712,8 @@ class Graspnet:
                 frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
                 o3d.visualization.draw_geometries([frame, fused_pcd_canonical] + geometries_reoriented, f'Reoriented Grasp Poses')
                 
-            # return grasp_poses_world, geometries_world, scores_world
-            return grasp_pose_reoriented, geometries_reoriented, scores_reoriented
+            # return grasp_pose_reoriented, geometries_reoriented, scores_reoriented
+            return [best_pose], [best_geometry], [best_score]
             
         except Exception as e:
             rospy.logerr(f"Error in grasp detection: {e}")
