@@ -605,9 +605,12 @@ def create_pose_msg(
         
     elif isinstance(grasp_pose, (list, np.ndarray)) and len(grasp_pose) == 7:
         # Input is [x, y, z, qx, qy, qz, qw]
-        pose_stamped.pose.position.x = float(grasp_pose[0]) + 0.07
+        # pose_stamped.pose.position.x = float(grasp_pose[0]) + 0.1
+        pose_stamped.pose.position.x = float(grasp_pose[0]) + 0.095
+        # pose_stamped.pose.position.x = float(grasp_pose[0]) + 0.08
         pose_stamped.pose.position.y = float(grasp_pose[1]) + 0.15
-        pose_stamped.pose.position.z = float(grasp_pose[2]) + 0.13
+        # pose_stamped.pose.position.z = float(grasp_pose[2]) + 0.13
+        pose_stamped.pose.position.z = float(grasp_pose[2]) + 0.12
         
         pose_stamped.pose.orientation.x = float(grasp_pose[3])
         pose_stamped.pose.orientation.y = float(grasp_pose[4])
