@@ -571,6 +571,41 @@ class Graspnet:
         best_score = grasp_scores[closest_grasp_index]
         
         return best_pose, best_geometry, best_score
+
+    def select_best_grasp_near_midpoint(self, grasp_poses, grasp_geometries, grasp_scores, object_pcd):
+        """
+        Selects the best grasp by finding the one closest to the geometric center 
+        of the object's axis-aligned bounding box (midpoint).
+        """
+        if not grasp_poses:
+            rospy.logwarn("No grasp poses provided to select from.")
+            return None, None, None
+
+        object_points = np.asarray(object_pcd.points)
+        if object_points.shape[0] == 0:
+            rospy.logwarn("Cannot compute midpoint of an empty point cloud.")
+            best_idx = np.argmax(grasp_scores)
+            return grasp_poses[best_idx], grasp_geometries[best_idx], grasp_scores[best_idx]
+            
+        # 1. CORRECT: Calculate the true 3D geometric midpoint
+        min_coords = np.min(object_points, axis=0)
+        max_coords = np.max(object_points, axis=0)
+        object_midpoint_3d = (min_coords + max_coords) / 2.0
+        rospy.loginfo(f"Object 3D midpoint (bounding box center) calculated at: {object_midpoint_3d}")
+
+        # 2. Find the grasp pose closest to the 3D midpoint
+        grasp_positions = np.array([pose[:3] for pose in grasp_poses])
+        distances_to_midpoint = np.linalg.norm(grasp_positions - object_midpoint_3d, axis=1)
+        
+        # 3. Select the index of the closest grasp
+        closest_grasp_index = np.argmin(distances_to_midpoint)
+        rospy.loginfo(f"Selected grasp #{closest_grasp_index} as it is closest to the 3D midpoint.")
+        
+        best_pose = grasp_poses[closest_grasp_index]
+        best_geometry = grasp_geometries[closest_grasp_index]
+        best_score = grasp_scores[closest_grasp_index]
+        
+        return best_pose, best_geometry, best_score
         
     def grasp_detection_real_world(self, fused_pcd_world, fused_pcd_canonical, world_to_canonical_transform, get_visual, min_score=0.25, top_down_only=True, num_best=10, simple_orientation=True):
         """
@@ -695,6 +730,10 @@ class Graspnet:
             best_pose, best_geometry, best_score = self.select_best_grasp_near_centroid(
                 grasp_pose_reoriented, geometries_reoriented, scores_reoriented, fused_pcd_canonical
             )
+
+            # best_pose, best_geometry, best_score = self.select_best_grasp_near_midpoint(
+            #     grasp_pose_reoriented, geometries_reoriented, scores_reoriented, fused_pcd_canonical
+            # )
 
             if best_pose is None:
                 rospy.logwarn("Could not select a best grasp pose.")
